@@ -21,12 +21,30 @@ import sys
 import warnings
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
+
+def _pause_and_exit(message, code=1):
+    """더블클릭 실행 시 창이 즉시 닫혀버리는 것을 막기 위해, 종료 전 사용자 입력을 기다린다."""
+    print(message, file=sys.stderr)
+    try:
+        input("\n엔터 키를 누르면 창을 닫습니다...")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    sys.exit(code)
+
+
+try:
+    import numpy as np
+    import pandas as pd
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+except ImportError as e:
+    _pause_and_exit(
+        f"[오류] 필요한 라이브러리가 설치되어 있지 않습니다: {e}\n\n"
+        "아래 명령을 실행해 필요한 패키지를 설치한 뒤 다시 실행해주세요:\n"
+        "    pip install pandas numpy matplotlib openpyxl statsmodels fpdf2"
+    )
 
 warnings.filterwarnings("ignore")
 import logging
@@ -684,7 +702,8 @@ def build_pdf_report(outpath, df, result, src_name, exclude_processes,
 # =====================================================================
 def main():
     ap = argparse.ArgumentParser(description="RAWDATA 엑셀로부터 분기별 매출 예측 리포트를 생성합니다.")
-    ap.add_argument("input", help="RAWDATA 엑셀 파일 경로")
+    ap.add_argument("input", nargs="?", default=None,
+                     help="RAWDATA 엑셀 파일 경로 (지정하지 않으면 실행 후 직접 입력받습니다)")
     ap.add_argument("--train-start", default=None, help="학습 시작분기 (예: 2012Q1). 기본값: 데이터의 첫 분기")
     ap.add_argument("--train-end", default=None, help="학습 종료분기 (예: 2025Q4). 기본값: 데이터의 마지막 분기")
     ap.add_argument("--forecast-start", default=None, help="예측 시작분기. 기본값: 학습종료분기 다음 분기")
@@ -694,9 +713,17 @@ def main():
     ap.add_argument("--outdir", default="./output", help="결과 저장 폴더 (기본값: ./output)")
     args = ap.parse_args()
 
+    if not args.input:
+        print("RAWDATA 엑셀 파일 경로가 지정되지 않았습니다.")
+        print("사용법: python sales_forecast_report.py RAWDATA.xlsx\n")
+        args.input = input("RAWDATA 엑셀 파일 경로를 입력하세요 (탐색기에서 파일을 이 창으로 끌어놓아도 됩니다): ")
+        args.input = args.input.strip().strip('"').strip("'")
+        if not args.input:
+            _pause_and_exit("[오류] 입력 파일이 지정되지 않았습니다.")
+
     src_path = Path(args.input)
     if not src_path.exists():
-        sys.exit(f"[오류] 파일을 찾을 수 없습니다: {src_path}")
+        _pause_and_exit(f"[오류] 파일을 찾을 수 없습니다: {src_path}")
 
     print(f"[1/5] RAWDATA 읽는 중... ({src_path.name})")
     df = load_rawdata(src_path)
@@ -743,4 +770,22 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except ModuleNotFoundError as e:
+        _pause_and_exit(
+            f"[오류] 필요한 라이브러리가 설치되어 있지 않습니다: {e}\n\n"
+            "아래 명령을 실행해 필요한 패키지를 설치한 뒤 다시 실행해주세요:\n"
+            "    pip install pandas numpy matplotlib openpyxl statsmodels fpdf2"
+        )
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        _pause_and_exit("\n[오류] 실행 중 문제가 발생했습니다. 위 내용을 확인해주세요.")
+    else:
+        try:
+            input("\n엔터 키를 누르면 창을 닫습니다...")
+        except (EOFError, KeyboardInterrupt):
+            pass
