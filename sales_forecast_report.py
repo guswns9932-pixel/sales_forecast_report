@@ -159,6 +159,76 @@ def show_done_gui(message):
         pass
 
 
+def pick_sheet_gui(sheet_names, default_sheet):
+    """RAWDATA가 들어있는 시트를 GUI 창에서 선택한다. 필수 컬럼 가이드도 함께 보여준다.
+    tkinter/디스플레이가 없거나 취소하면 None 반환."""
+    try:
+        import tkinter as tk
+    except Exception:
+        return None
+    try:
+        root = tk.Tk()
+        root.title("시트 선택")
+        root.attributes("-topmost", True)
+        selected = {"sheet": None}
+
+        tk.Label(root, text="RAWDATA가 들어있는 시트를 선택하세요", font=("", 11, "bold"),
+                 anchor="w", justify="left").pack(padx=14, pady=(14, 6), anchor="w")
+
+        guide_text = "[필수 컬럼 안내]\n" + "\n".join(f"- {c}: {d}" for c, d in COLUMN_GUIDE.items())
+        tk.Label(root, text=guide_text, font=("", 9), fg="#555", justify="left",
+                 anchor="w", wraplength=440).pack(padx=14, pady=(0, 10), anchor="w")
+
+        listbox = tk.Listbox(root, height=min(8, len(sheet_names)), exportselection=False)
+        for name in sheet_names:
+            listbox.insert(tk.END, name)
+        default_idx = sheet_names.index(default_sheet) if default_sheet in sheet_names else 0
+        listbox.selection_set(default_idx)
+        listbox.activate(default_idx)
+        listbox.pack(padx=14, pady=(0, 12), fill="x")
+
+        def on_ok():
+            sel = listbox.curselection()
+            selected["sheet"] = sheet_names[sel[0]] if sel else None
+            root.destroy()
+
+        def on_cancel():
+            selected["sheet"] = None
+            root.destroy()
+
+        btn_frame = tk.Frame(root)
+        btn_frame.pack(padx=14, pady=(0, 14), anchor="e")
+        tk.Button(btn_frame, text="취소", width=8, command=on_cancel).pack(side="right", padx=(6, 0))
+        tk.Button(btn_frame, text="확인", width=8, command=on_ok).pack(side="right")
+
+        root.mainloop()
+        return selected["sheet"]
+    except Exception:
+        return None
+
+
+def pick_sheet_console(sheet_names, default_sheet):
+    """콘솔에서 시트를 선택받는다. 필수 컬럼 가이드를 함께 출력한다."""
+    if len(sheet_names) == 1:
+        return sheet_names[0]
+    print("\n" + column_guide_text())
+    print("\n엑셀 시트 목록:")
+    for i, name in enumerate(sheet_names, 1):
+        marker = " (기본값)" if name == default_sheet else ""
+        print(f"  {i}. {name}{marker}")
+    raw = input("\n사용할 시트 번호 또는 이름을 입력하세요 (엔터 시 기본값 사용): ").strip()
+    if not raw:
+        return default_sheet
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(sheet_names):
+            return sheet_names[idx]
+    if raw in sheet_names:
+        return raw
+    print(f"[안내] '{raw}'는 올바른 시트가 아니어서 기본값을 사용합니다: {default_sheet}")
+    return default_sheet
+
+
 # =====================================================================
 # 분기 유틸리티
 # =====================================================================
@@ -210,13 +280,35 @@ def add_quarters(label, n):
 # =====================================================================
 REQUIRED_COLS = ["매출일", "모델", "반입라인", "공정", "메이커", "수량", "단가(KRW)", "매출액(KRW)"]
 
+COLUMN_GUIDE = {
+    "매출일": "매출(거래)이 발생한 날짜입니다. (예: 2025-03-15)",
+    "모델": "판매된 장비/부품의 모델명입니다. 예측 시 '모델별' 기준이 됩니다.",
+    "반입라인": "장비가 투입되는 고객사 생산라인 구분입니다.",
+    "공정": "해당 매출이 속한 공정 단계입니다. (예: 증착, 식각, 세정 등) 예측 시 '공정별' 기준이 됩니다.",
+    "메이커": "장비/부품 제조사(설비 메이커)입니다. 예측 시 '메이커(설비)별' 기준이 됩니다.",
+    "수량": "판매 수량입니다. 숫자만 입력되어야 합니다.",
+    "단가(KRW)": "개당 단가(원화)입니다.",
+    "매출액(KRW)": "총 매출액(원화)입니다. 보통 수량 × 단가로 계산됩니다.",
+}
 
-def load_rawdata(path, logger=None):
-    """RAWDATA 시트를 읽는다. 표준 양식(1행 헤더, 2~3행 안내, 4행부터 데이터)과
+
+def column_guide_text():
+    lines = ["[RAWDATA 필수 컬럼 안내] 아래 8개 컬럼이 선택한 시트에 정확한 이름으로 있어야 합니다:"]
+    for col, desc in COLUMN_GUIDE.items():
+        lines.append(f"  - {col}: {desc}")
+    lines.append("컬럼명은 대소문자/띄어쓰기까지 정확히 일치해야 합니다.")
+    lines.append("1행 헤더 다음 2~3행에 '필수/권장/선택/자동' 같은 안내문구가 있는 표준 양식과,")
+    lines.append("안내문구 없이 2행부터 바로 데이터가 시작하는 단순 표 양식을 모두 지원합니다.")
+    return "\n".join(lines)
+
+
+def detect_default_sheet(sheet_names):
+    return "RAWDATA" if "RAWDATA" in sheet_names else sheet_names[0]
+
+
+def load_rawdata(path, sheet, logger=None):
+    """지정한 시트를 읽는다. 표준 양식(1행 헤더, 2~3행 안내, 4행부터 데이터)과
     일반적인 단순 표(1행 헤더, 2행부터 데이터) 둘 다 지원한다."""
-    xls = pd.ExcelFile(path)
-    sheet = "RAWDATA" if "RAWDATA" in xls.sheet_names else xls.sheet_names[0]
-
     raw_preview = pd.read_excel(path, sheet_name=sheet, header=0, nrows=3)
     tag_row_present = raw_preview.iloc[0].astype(str).str.contains("필수|권장|선택|자동").any()
     skiprows = [1, 2] if tag_row_present else None
@@ -226,7 +318,10 @@ def load_rawdata(path, logger=None):
 
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
-        raise ValueError(f"RAWDATA에 다음 컬럼이 없습니다: {missing}\n실제 컬럼: {list(df.columns)}")
+        raise ValueError(
+            f"'{sheet}' 시트에 다음 필수 컬럼이 없습니다: {missing}\n"
+            f"실제 컬럼: {list(df.columns)}\n\n{column_guide_text()}"
+        )
 
     n_before = len(df)
     df = df.dropna(subset=["매출일", "공정", "모델", "메이커"]).copy()
@@ -676,7 +771,7 @@ code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 </style></head>
 <body><div class="wrap">
 <h1>매출 예측 리포트</h1>
-<div class="meta">학습기간: {train_start} ~ {train_end} &nbsp;|&nbsp; 예측기간: {fc_start} ~ {fc_end} &nbsp;|&nbsp; 생성 파일: {src_name}</div>
+<div class="meta">학습기간: {train_start} ~ {train_end} &nbsp;|&nbsp; 예측기간: {fc_start} ~ {fc_end} &nbsp;|&nbsp; 생성 파일: {src_name} ({sheet_name} 시트)</div>
 {exclude_note}
 
 <div class="card">
@@ -760,7 +855,7 @@ def _dimension_table_html(summary, dim_col, dim_label):
             f"{rows}</table>")
 
 
-def build_html_report(df, result, src_name, exclude_processes, log_path):
+def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_path):
     detail = result["detail"]
     train_quarters, fc_quarters = result["train_quarters"], result["fc_quarters"]
     n_ahead = len(fc_quarters)
@@ -840,7 +935,7 @@ def build_html_report(df, result, src_name, exclude_processes, log_path):
     html = HTML_TEMPLATE.format(
         magenta=BRAND_MAGENTA, gray=BRAND_GRAY,
         train_start=train_quarters[0], train_end=train_quarters[-1],
-        fc_start=fc_quarters[0], fc_end=fc_quarters[-1], src_name=src_name,
+        fc_start=fc_quarters[0], fc_end=fc_quarters[-1], src_name=src_name, sheet_name=sheet_name,
         exclude_note=exclude_note, log_name=log_path.name,
         total_base_fmt=fmt_krw(total_base), total_fc_fmt=fmt_krw(total_fc),
         total_pct_fmt=(f"{'+' if total_pct>=0 else ''}{total_pct*100:.1f}%" if total_pct is not None else "N/A"),
@@ -885,7 +980,7 @@ def _pdf_dimension_table(pdf, summary, dim_col, header_label):
         pdf.ln()
 
 
-def build_pdf_report(outpath, df, result, src_name, exclude_processes, ctx, log_path):
+def build_pdf_report(outpath, df, result, src_name, sheet_name, exclude_processes, ctx, log_path):
     from fpdf import FPDF
 
     train_quarters, fc_quarters = result["train_quarters"], result["fc_quarters"]
@@ -935,7 +1030,7 @@ def build_pdf_report(outpath, df, result, src_name, exclude_processes, ctx, log_
     pdf.set_font(pdf.font_family, "", 10)
     pdf.set_text_color(120, 120, 120)
     pdf.cell(0, 8, f"학습기간 {train_quarters[0]}~{train_quarters[-1]}  |  "
-                    f"예측기간 {fc_quarters[0]}~{fc_quarters[-1]}  |  원본: {src_name}", ln=True)
+                    f"예측기간 {fc_quarters[0]}~{fc_quarters[-1]}  |  원본: {src_name} ({sheet_name} 시트)", ln=True)
     pdf.ln(2)
 
     if exclude_processes:
@@ -1017,8 +1112,14 @@ def main():
     ap.add_argument("--exclude-process", nargs="*", default=["미확인"],
                      help="돌발성 매출로 간주해 예측에서 제외할 공정명 목록 (기본값: 미확인). 없애려면 --exclude-process 를 빈 값으로")
     ap.add_argument("--outdir", default=None, help="결과 저장 폴더 (기본값: 입력 파일과 같은 위치의 output 폴더)")
-    ap.add_argument("--no-gui", action="store_true", help="파일 선택 창을 띄우지 않고 콘솔 입력만 사용합니다")
+    ap.add_argument("--sheet", default=None, help="RAWDATA가 들어있는 시트 이름 (지정하지 않으면 자동 감지하거나 선택창이 뜹니다)")
+    ap.add_argument("--no-gui", action="store_true", help="파일/시트 선택 창을 띄우지 않고 콘솔 입력만 사용합니다")
+    ap.add_argument("--column-guide", action="store_true", help="RAWDATA에 필요한 필수 컬럼 안내를 출력하고 종료합니다")
     args = ap.parse_args()
+
+    if args.column_guide:
+        print(column_guide_text())
+        sys.exit(0)
 
     used_gui = False
     if not args.input:
@@ -1038,16 +1139,35 @@ def main():
     if not src_path.exists():
         _pause_and_exit(f"[오류] 파일을 찾을 수 없습니다: {src_path}")
 
+    try:
+        sheet_names = pd.ExcelFile(src_path).sheet_names
+    except Exception as e:
+        _pause_and_exit(f"[오류] 엑셀 파일을 열 수 없습니다: {e}")
+
+    default_sheet = detect_default_sheet(sheet_names)
+    if args.sheet:
+        if args.sheet not in sheet_names:
+            _pause_and_exit(f"[오류] 지정한 시트를 찾을 수 없습니다: {args.sheet}\n사용 가능한 시트: {sheet_names}")
+        chosen_sheet = args.sheet
+    elif len(sheet_names) == 1:
+        chosen_sheet = sheet_names[0]
+    else:
+        chosen_sheet = None if args.no_gui else pick_sheet_gui(sheet_names, default_sheet)
+        if not chosen_sheet:
+            chosen_sheet = pick_sheet_console(sheet_names, default_sheet)
+
     outdir = Path(args.outdir) if args.outdir else (src_path.parent / "output")
     logger, log_path = setup_logger(outdir)
     logger.info("=" * 70)
     logger.info("매출 예측 리포트 생성을 시작합니다")
     logger.info(f"입력 파일: {src_path}")
+    logger.info(f"사용 시트: {chosen_sheet} (엑셀 내 시트 목록: {sheet_names})")
     logger.info(f"결과 폴더: {outdir}")
     logger.info("=" * 70)
+    logger.info(column_guide_text())
 
-    logger.info(f"[1/5] RAWDATA 읽는 중... ({src_path.name})")
-    df = load_rawdata(src_path, logger=logger)
+    logger.info(f"[1/5] RAWDATA 읽는 중... ({src_path.name} / 시트: {chosen_sheet})")
+    df = load_rawdata(src_path, chosen_sheet, logger=logger)
     logger.info(f"      -> {len(df):,}건, {df['매출일'].min().date()} ~ {df['매출일'].max().date()}")
 
     all_quarters = build_quarter_axis(df)
@@ -1061,7 +1181,7 @@ def main():
                            exclude_processes=tuple(args.exclude_process or []), logger=logger)
 
     logger.info("[3/5] 그래프/리포트 생성 중...")
-    html, ctx = build_html_report(df, result, src_path.name, args.exclude_process or [], log_path)
+    html, ctx = build_html_report(df, result, src_path.name, chosen_sheet, args.exclude_process or [], log_path)
 
     html_path = outdir / "매출예측_리포트.html"
     html_path.write_text(html, encoding="utf-8")
@@ -1069,7 +1189,7 @@ def main():
 
     logger.info("[4/5] PDF 생성 중...")
     pdf_path = outdir / "매출예측_리포트.pdf"
-    build_pdf_report(pdf_path, df, result, src_path.name, args.exclude_process or [], ctx, log_path)
+    build_pdf_report(pdf_path, df, result, src_path.name, chosen_sheet, args.exclude_process or [], ctx, log_path)
     logger.info(f"      -> {pdf_path}")
 
     logger.info("[5/5] 완료!")
