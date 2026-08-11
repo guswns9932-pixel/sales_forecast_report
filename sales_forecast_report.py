@@ -548,6 +548,12 @@ def confidence_label(scores, method):
 
 CONFIDENCE_RANK = {"높음": 0, "보통": 1, "낮음(참고용)": 2, "N/A": 3}
 
+# 백테스트 검증 구간(origin) 최대 개수. origin이 2개뿐이면 특정 시기 하나의 변동성에
+# sMAPE 추정치가 크게 흔들릴 수 있어, 학습 데이터가 충분한 조합은 검증을 더 여러 번
+# 반복(rolling-origin)해 오차 추정을 안정시킨다. 데이터가 짧은 조합은 min_train 제약으로
+# 자연히 origin이 이보다 적게 잡힌다.
+MAX_BACKTEST_ORIGINS = 6
+
 # 신뢰도가 "낮음(참고용)"인 조합은 백테스트 오차가 25%를 넘어 알고리즘이 불안정한 추세/계절성을
 # 과도하게 연장했을 가능성이 있다. 이런 예측이 과거 최대 실적 대비 비정상적으로 튀어 리포트
 # 총계를 왜곡하지 않도록, 한 기간의 예측치가 과거 최대 실적의 이 배수를 넘지 않게 상한을 둔다.
@@ -602,7 +608,12 @@ def forecast_series(values, n_ahead, season=4, window=4, logger=None, series_nam
     methods = build_candidate_methods(season, window)
     test_h = max(1, min(n_ahead, 4))
     min_train = 4
-    origins = sorted({o for o in (n - test_h, n - 2 * test_h) if o >= min_train}, reverse=True)
+    origins = []
+    o = n - test_h
+    while o >= min_train and len(origins) < MAX_BACKTEST_ORIGINS:
+        origins.append(o)
+        o -= test_h
+    origins = sorted(set(origins), reverse=True)
 
     scores = {}
     if origins:
