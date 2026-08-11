@@ -1126,13 +1126,49 @@ def build_pdf_report(outpath, df, result, src_name, sheet_name, exclude_processe
 # =====================================================================
 # 파이프라인 (CLI/GUI 공용)
 # =====================================================================
+def _ensure_writable_dir(outdir):
+    """outdir에 실제로 쓰기가 가능한지 확인하고, 권한이 없으면(예: 접근이 제한된 공유/네트워크
+    드라이브) 사용자 문서 폴더 하위로 대체한다. 반환: (실제 사용할 경로, 안내 메시지 또는 None)"""
+    try:
+        outdir.mkdir(parents=True, exist_ok=True)
+        probe = outdir / ".__write_test__.tmp"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return outdir, None
+    except (PermissionError, OSError):
+        fallback = Path.home() / "Documents" / "매출예측_리포트" / outdir.name
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback, f"'{outdir}' 폴더에 쓰기 권한이 없어 결과를 '{fallback}'에 대신 저장합니다."
+
+
+def _safe_write_file(write_fn, path, logger=None):
+    """write_fn(path)로 저장을 시도한다. 파일이 다른 프로그램(PDF/엑셀 뷰어 등)에서 열려있어
+    PermissionError가 나면, 같은 폴더에 시각을 붙인 다른 이름으로 대신 저장한다."""
+    try:
+        write_fn(path)
+        return path
+    except PermissionError:
+        ts = datetime.now().strftime("%H%M%S")
+        alt_path = path.parent / f"{path.stem}_{ts}{path.suffix}"
+        if logger:
+            logger.warning(
+                f"'{path.name}' 파일을 저장하지 못했습니다 (다른 프로그램에서 열려있거나 접근 권한이 없는 것으로 보입니다). "
+                f"'{alt_path.name}' 이름으로 대신 저장합니다. "
+                f"(파일이 열려 있었다면 닫은 뒤 다시 실행하면 원래 이름으로 저장됩니다)"
+            )
+        write_fn(alt_path)
+        return alt_path
+
+
 def run_pipeline(input_path, sheet, gran, train_start, train_end, forecast_start, forecast_end,
                   exclude_processes, outdir, extra_log_handler=None):
     """RAWDATA 로드부터 HTML/PDF/로그 생성까지 전체 과정을 실행한다.
     CLI 콘솔 모드와 GUI 모드가 이 함수를 공유한다."""
     input_path = Path(input_path)
-    outdir = Path(outdir)
+    outdir, outdir_fallback_note = _ensure_writable_dir(Path(outdir))
     logger, log_path = setup_logger(outdir, extra_handler=extra_log_handler)
+    if outdir_fallback_note:
+        logger.warning(outdir_fallback_note)
     logger.info("=" * 70)
     logger.info("매출 예측 리포트 생성을 시작합니다")
     logger.info(f"입력 파일: {input_path}")
@@ -1154,13 +1190,14 @@ def run_pipeline(input_path, sheet, gran, train_start, train_end, forecast_start
 
     logger.info("[3/5] 그래프/리포트 생성 중...")
     html, ctx = build_html_report(df, result, input_path.name, sheet, exclude_processes or [], log_path)
-    html_path = outdir / "매출예측_리포트.html"
-    html_path.write_text(html, encoding="utf-8")
+    html_path = _safe_write_file(lambda p: p.write_text(html, encoding="utf-8"),
+                                  outdir / "매출예측_리포트.html", logger)
     logger.info(f"      -> {html_path}")
 
     logger.info("[4/5] PDF 생성 중...")
-    pdf_path = outdir / "매출예측_리포트.pdf"
-    build_pdf_report(pdf_path, df, result, input_path.name, sheet, exclude_processes or [], ctx, log_path)
+    pdf_path = _safe_write_file(
+        lambda p: build_pdf_report(p, df, result, input_path.name, sheet, exclude_processes or [], ctx, log_path),
+        outdir / "매출예측_리포트.pdf", logger)
     logger.info(f"      -> {pdf_path}")
 
     logger.info("[5/5] 완료!")
