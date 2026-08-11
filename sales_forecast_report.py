@@ -611,7 +611,7 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
     # 전사/공정 top-down (계절성 반영) — bottom-up과 교차검증용
     total_hist = amt_piv.sum(axis=1).values
     total_fc_topdown, total_method_topdown, _ = forecast_series(
-        total_hist, n_ahead, season=season, window=window, logger=logger, series_name="전사 합계(하향식)")
+        total_hist, n_ahead, season=season, window=window, logger=logger, series_name="전사 합계(전사통합)")
 
     proc_topdown = {}
     for proc in processes:
@@ -623,7 +623,7 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
             continue
         series = amt_piv[cols].sum(axis=1).values
         fc, m, sc = forecast_series(series, n_ahead, season=season, window=window,
-                                     logger=logger, series_name=f"공정 합계(하향식): {proc}")
+                                     logger=logger, series_name=f"공정 합계(전사통합): {proc}")
         proc_topdown[proc] = (fc, m, sc)
 
     return {
@@ -683,17 +683,21 @@ def chart_total_trend(train_periods, total_hist, fc_periods, total_fc_bottomup, 
     n_hist = len(train_periods)
     fc_x = list(range(n_hist, n_hist + len(fc_periods)))
     ax.plot(fc_x, total_fc_bottomup, color=BRAND_MAGENTA, marker="D", markersize=5,
-            linewidth=1.8, label="예측(상향식: 조합별 합산)")
+            linewidth=1.8, label="예측 · 조합별 합산(기본)")
     ax.plot(fc_x, total_fc_topdown, color="#1f77b4", marker="s", markersize=5,
-            linewidth=1.4, linestyle="--", label="예측(하향식: 전사 계절성 모델)")
+            linewidth=1.4, linestyle="--", label="예측 · 전사 통합(참고)")
     # connect last actual to forecast start
     ax.plot([n_hist - 1, n_hist], [total_hist[-1], total_fc_bottomup[0]], color=BRAND_MAGENTA, linewidth=1, alpha=0.5)
     ax.plot([n_hist - 1, n_hist], [total_hist[-1], total_fc_topdown[0]], color="#1f77b4", linewidth=1, alpha=0.5, linestyle="--")
 
-    # 예측 구간 데이터 레이블(상향식만 표기 - 리포트의 기본 예측치)
+    # 예측 구간 데이터 레이블 (조합별 합산은 위쪽, 전사 통합은 아래쪽 - 겹침을 줄이기 위함.
+    # 그래프만으로 겹쳐 읽기 어려운 정확한 수치는 아래 표에서 확인 가능)
     for x, y in zip(fc_x, total_fc_bottomup):
         ax.annotate(f"{y/1e8:,.1f}억", (x, y), textcoords="offset points", xytext=(0, 9),
                     ha="center", fontsize=7, color=BRAND_MAGENTA)
+    for x, y in zip(fc_x, total_fc_topdown):
+        ax.annotate(f"{y/1e8:,.1f}억", (x, y), textcoords="offset points", xytext=(0, -12),
+                    ha="center", fontsize=7, color="#1f77b4")
 
     all_labels = list(train_periods) + list(fc_periods)
     step = max(1, len(all_labels) // 16)
@@ -800,8 +804,8 @@ code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 <summary>이 리포트 읽는 법 (클릭하여 펼치기/접기)</summary>
 <div style="font-size:13px; line-height:1.8; margin-top:10px; color:#333;">
 <b>직전 동기간 실적</b>: 예측기간과 길이가 같은 가장 최근 실적기간의 실제 매출입니다. (예: {n_ahead}개 {unit}를 예측하면 직전 {n_ahead}개 {unit}의 실제 실적과 비교합니다)<br>
-<b>예측합계(상향식)</b>: 공정×모델×메이커 조합 하나하나에 대해, 아래 "백테스트"로 가장 정확했던 알고리즘을 적용해 예측한 값을 모두 더한 값입니다. 이 리포트의 기본 예측치입니다.<br>
-<b>하향식(전사 계절성모델)</b>: 조합별로 나누지 않고 전사 매출 전체에 계절성 모델 하나를 적용한 값입니다. 상향식과 크게 차이가 나면 특정 조합에 이상치가 섞였을 가능성을 점검해볼 수 있습니다.<br>
+<b>조합별 합산 예측(기본)</b>: 공정×모델×메이커 조합 하나하나에 대해, 아래 "백테스트"로 가장 정확했던 알고리즘을 적용해 예측한 값을 모두 더한 값입니다. 이 리포트의 기본 예측치입니다. (예전 표현: 상향식)<br>
+<b>전사 통합 예측(참고)</b>: 조합별로 나누지 않고 전사 매출 전체를 하나로 보고 계절성 모델을 적용한 값입니다. '조합별 합산 예측'과 크게 차이가 나면 특정 조합에 이상치가 섞였을 가능성을 점검해볼 수 있습니다. (예전 표현: 하향식)<br>
 <b>백테스트</b>: 과거 데이터를 학습구간과 검증구간으로 나눈 뒤, 학습구간만으로 검증구간을 예측해보고 실제값과 얼마나 차이 나는지(오차율, sMAPE) 계산하는 절차입니다. 이 리포트는 {method_count}가지 예측 알고리즘을 모두 백테스트해서 조합마다 오차가 가장 작은 알고리즘을 자동으로 선택합니다.<br>
 <b>예측신뢰도</b>: 백테스트 오차율 기준입니다 — 10% 이하 <span class="conf-high">높음</span>, 10~25% <span class="conf-mid">보통</span>, 25% 초과 <span class="conf-low">낮음(참고용)</span>. 데이터가 너무 적어 백테스트 자체가 불가능했던 조합은 'N/A'로 표시하고 보수적으로 과거 평균을 유지합니다.<br>
 <b>메이커(설비)</b>: RAWDATA의 '메이커' 컬럼을 설비 제조사 기준 구분으로 사용해 집계했습니다.<br>
@@ -813,14 +817,15 @@ code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 
 <div class="summary-box">
   <div class="stat"><div class="label">직전 동기간 실적 (전사, 미확인 제외)</div><div class="value">{total_base_fmt}</div></div>
-  <div class="stat"><div class="label">예측 합계 (상향식)</div><div class="value">{total_fc_fmt}</div></div>
+  <div class="stat"><div class="label">조합별 합산 예측 (기본)</div><div class="value">{total_fc_fmt}</div></div>
   <div class="stat"><div class="label">증감률</div><div class="value">{total_pct_fmt}</div></div>
-  <div class="stat"><div class="label">하향식(전사 계절성모델) 예측</div><div class="value">{total_topdown_fmt}</div><div class="methodbadge">{topdown_method}</div></div>
+  <div class="stat"><div class="label">전사 통합 예측 (참고)</div><div class="value">{total_topdown_fmt}</div><div class="methodbadge">{topdown_method}</div></div>
 </div>
 
 <div class="card"><h2 style="margin-top:0;border:none;">전사 매출 추이 및 예측</h2>
 <img src="data:image/png;base64,{chart_total}"/>
-<p style="font-size:13px;color:{gray}">실선(회색)은 실적, 마름모(마젠타)는 조합별 예측을 합산한 상향식 결과(값 표기), 파란 점선은 전사 데이터 자체에 계절성 모델을 적용한 하향식 결과입니다. 두 방식이 크게 어긋나면 개별 조합의 이상치를 의심해볼 수 있습니다.</p>
+<p style="font-size:13px;color:{gray}">실선(회색)은 실적, 마름모(마젠타)는 조합별로 예측해 합산한 <b>조합별 합산 예측(기본)</b> 결과, 파란 점선은 전사 데이터 전체에 계절성 모델을 적용한 <b>전사 통합 예측(참고)</b> 결과입니다. 두 방식이 크게 어긋나면 개별 조합의 이상치를 의심해볼 수 있습니다. 그래프의 예측 구간 값 레이블이 겹쳐 보이기 어려운 경우, 아래 상세 데이터표에서 정확한 수치를 확인할 수 있습니다.</p>
+{trend_table}
 </div>
 
 <div class="card"><h2 style="margin-top:0;border:none;">공정별 실적 대비 예측</h2>
@@ -874,6 +879,21 @@ def _dimension_table_html(summary, dim_col, dim_label):
             f"{rows}</table>")
 
 
+def _trend_table_html(train_periods, total_hist, fc_periods, total_fc_bottomup, total_fc_topdown, unit):
+    """전사 추이 그래프는 기간이 많아 모든 점에 값을 표기하기 어려우므로,
+    그래프 아래에서 펼쳐볼 수 있는 기간별 상세 수치표를 만든다."""
+    rows = []
+    for period, v in zip(train_periods, total_hist):
+        rows.append(f"<tr><td>{period}</td><td>{fmt_eok(v)}</td><td>-</td><td>-</td></tr>")
+    for period, bu, td in zip(fc_periods, total_fc_bottomup, total_fc_topdown):
+        rows.append(f"<tr><td>{period}</td><td>-</td><td>{fmt_eok(bu)}</td><td>{fmt_eok(td)}</td></tr>")
+    n_total = len(train_periods) + len(fc_periods)
+    table = (f"<table><tr><th>{unit}</th><th>실적</th><th>조합별 합산 예측(기본)</th><th>전사 통합 예측(참고)</th></tr>"
+             f"{''.join(rows)}</table>")
+    return (f"<details><summary>{unit}별 상세 데이터표 보기 (전체 {n_total}개 구간, 클릭하여 펼치기/접기)</summary>"
+            f"<div class=\"tablewrap\" style=\"margin-top:10px;\">{table}</div></details>")
+
+
 def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_path):
     detail = result["detail"]
     train_periods, fc_periods = result["train_periods"], result["fc_periods"]
@@ -892,6 +912,8 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
 
     total_fc_bottomup_arr = np.sum(np.stack(active["amt_fc"].values), axis=0) if len(active) else np.zeros(n_ahead)
     chart_total = chart_total_trend(train_periods, result["total_hist"], fc_periods,
+                                     total_fc_bottomup_arr, result["total_fc_topdown"], gran)
+    trend_table = _trend_table_html(train_periods, result["total_hist"], fc_periods,
                                      total_fc_bottomup_arr, result["total_fc_topdown"], gran)
     chart_proc = chart_dimension_bar(proc_summary, "공정", "공정별 실적 대비 예측")
     chart_model = chart_dimension_bar(model_summary, "모델", "모델별 실적 대비 예측")
@@ -963,7 +985,7 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         total_pct_fmt=(f"{'+' if total_pct>=0 else ''}{total_pct*100:.1f}%" if total_pct is not None else "N/A"),
         total_topdown_fmt=fmt_eok(total_topdown), topdown_method=result["total_method_topdown"],
         chart_total=chart_total, chart_proc=chart_proc, chart_model=chart_model, chart_maker=chart_maker,
-        chart_top=chart_top,
+        chart_top=chart_top, trend_table=trend_table,
         proc_table=proc_table, model_table=model_table, maker_table=maker_table,
         narrative=narrative,
         n_combo=len(detail), detail_table=detail_table,
@@ -975,6 +997,7 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         "total_base": total_base, "total_fc": total_fc, "total_pct": total_pct, "total_topdown": total_topdown,
         "chart_total": chart_total, "chart_proc": chart_proc, "chart_model": chart_model,
         "chart_maker": chart_maker, "chart_top": chart_top,
+        "fc_bottomup_arr": total_fc_bottomup_arr,
     }
     return html, ctx
 
@@ -1068,12 +1091,28 @@ def build_pdf_report(outpath, df, result, src_name, sheet_name, exclude_processe
     pct_txt = f"{'+' if total_pct is not None and total_pct>=0 else ''}{total_pct*100:.1f}%" if total_pct is not None else "N/A"
     pdf.set_x(pdf.l_margin)
     pdf.multi_cell(0, 7, f"전사 직전동기간 실적: {fmt_eok(total_base)}\n"
-                         f"전사 예측 합계(상향식): {fmt_eok(total_fc)}  ({pct_txt})\n"
-                         f"전사 예측(하향식/계절성모델): {fmt_eok(total_topdown)}")
+                         f"전사 조합별 합산 예측(기본): {fmt_eok(total_fc)}  ({pct_txt})\n"
+                         f"전사 통합 예측(참고): {fmt_eok(total_topdown)}")
     pdf.ln(3)
 
     img1 = io.BytesIO(base64.b64decode(ctx["chart_total"]))
     pdf.image(img1, w=180)
+    pdf.ln(2)
+
+    pdf.set_font(pdf.font_family, "", 9)
+    pdf.set_fill_color(200, 0, 124)
+    pdf.set_text_color(255, 255, 255)
+    headers = [gran, "조합별 합산(기본)", "전사 통합(참고)"]
+    widths = [40, 65, 65]
+    for h, w in zip(headers, widths):
+        pdf.cell(w, 8, h, border=1, align="C", fill=True)
+    pdf.ln()
+    pdf.set_text_color(30, 30, 30)
+    for period, bu, td in zip(fc_periods, ctx["fc_bottomup_arr"], result["total_fc_topdown"]):
+        pdf.cell(widths[0], 7, str(period), border=1)
+        pdf.cell(widths[1], 7, fmt_eok(bu), border=1, align="R")
+        pdf.cell(widths[2], 7, fmt_eok(td), border=1, align="R")
+        pdf.ln()
 
     for title, summary, dim_col, chart_key, header_label in [
         ("공정별 실적 대비 예측", ctx["proc_summary"], "공정", "chart_proc", "공정"),
@@ -1204,10 +1243,10 @@ def run_pipeline(input_path, sheet, gran, train_start, train_end, forecast_start
     logger.info(f"전사 직전동기간 실적: {fmt_eok(ctx['total_base'])}")
     if ctx["total_pct"] is not None:
         sign = "+" if ctx["total_pct"] >= 0 else ""
-        logger.info(f"전사 예측 합계(상향식): {fmt_eok(ctx['total_fc'])} ({sign}{ctx['total_pct']*100:.1f}%)")
+        logger.info(f"전사 조합별 합산 예측(기본): {fmt_eok(ctx['total_fc'])} ({sign}{ctx['total_pct']*100:.1f}%)")
     else:
-        logger.info(f"전사 예측 합계(상향식): {fmt_eok(ctx['total_fc'])}")
-    logger.info(f"전사 예측(하향식/계절성모델): {fmt_eok(ctx['total_topdown'])}")
+        logger.info(f"전사 조합별 합산 예측(기본): {fmt_eok(ctx['total_fc'])}")
+    logger.info(f"전사 통합 예측(참고): {fmt_eok(ctx['total_topdown'])}")
     logger.info(f"실행 로그 저장 위치: {log_path}")
 
     return {"html": html_path, "pdf": pdf_path, "log": log_path, "outdir": outdir}
