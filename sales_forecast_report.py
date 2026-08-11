@@ -9,7 +9,7 @@ RAWDATA 엑셀(매출일/모델/반입라인/공정/메이커/수량/단가/매�
   - 더블클릭(또는 인자 없이 실행) 시 콘솔(DOS) 창 없이 하나의 윈도우 창에서
     파일 선택 → 시트/기간단위 선택 → 학습·예측기간 선택 → 실행 → 로그 확인까지 진행
   - 예측기간 단위(분기/월/년)를 직접 선택하고, 학습·예측 시작/종료 시점을 직접 지정
-  - 공정×모델×메이커(설비) 조합 단위로 예측하고, 모델별/설비(메이커)별/공정별로
+  - 공정×메이커(설비)×모델 조합 단위로 예측하고, 공정별/메이커(설비)별/모델별로
     묶어서 볼 수 있는 리포트 생성
   - 여러 예측 알고리즘(계절성 지수평활, Croston-SBA 간헐수요모델, 선형추세,
     이동평균, 계절성 단순모형, 평균유지)을 실제 로우데이터로 백테스트하여
@@ -293,10 +293,10 @@ def load_rawdata(path, sheet, logger=None):
         )
 
     n_before = len(df)
-    df = df.dropna(subset=["매출일", "공정", "모델", "메이커"]).copy()
+    df = df.dropna(subset=["매출일", "공정", "메이커", "모델"]).copy()
     n_dropped = n_before - len(df)
     if logger and n_dropped:
-        logger.warning(f"매출일/공정/모델/메이커 중 결측값이 있는 {n_dropped}건을 제외했습니다.")
+        logger.warning(f"매출일/공정/메이커/모델 중 결측값이 있는 {n_dropped}건을 제외했습니다.")
 
     df["매출일"] = pd.to_datetime(df["매출일"])
 
@@ -451,6 +451,35 @@ def method_description(name, gran, window):
     return tmpl.format(unit=gran, window=window)
 
 
+def reader_guide_items(n_ahead, unit, method_count):
+    """리포트 상단의 "읽는 법" 안내 내용. HTML과 PDF가 같은 문구를 공유해서
+    두 결과물의 내용이 어긋나지 않도록 한다. 반환: [(제목, 설명), ...]"""
+    return [
+        ("직전 동기간 실적",
+         f"예측기간과 길이가 같은 가장 최근 실적기간의 실제 매출입니다. "
+         f"(예: {n_ahead}개 {unit}를 예측하면 직전 {n_ahead}개 {unit}의 실제 실적과 비교합니다)"),
+        ("조합별 합산 예측(기본)",
+         "공정×메이커×모델 조합 하나하나에 대해, 백테스트로 가장 정확했던 알고리즘을 적용해 예측한 값을 "
+         "모두 더한 값입니다. 이 리포트의 기본 예측치입니다. (예전 표현: 상향식)"),
+        ("전사 통합 예측(참고)",
+         "조합별로 나누지 않고 전사 매출 전체를 하나로 보고 계절성 모델을 적용한 값입니다. "
+         "'조합별 합산 예측'과 크게 차이가 나면 특정 조합에 이상치가 섞였을 가능성을 점검해볼 수 있습니다. (예전 표현: 하향식)"),
+        ("두 예측 중 어느 쪽이 더 큰가요?",
+         "정해진 규칙은 없습니다. 두 방식은 서로 다른 독립적인 계산이라 기간에 따라 어느 한쪽이 더 클 수도, "
+         "작을 수도 있습니다. 항상 조합별 합산 예측이 더 크다거나 전사 통합 예측이 더 작다는 보장은 없으니, "
+         "상세 데이터표에서 기간별로 직접 비교해보세요."),
+        ("백테스트",
+         f"과거 데이터를 학습구간과 검증구간으로 나눈 뒤, 학습구간만으로 검증구간을 예측해보고 실제값과 "
+         f"얼마나 차이 나는지(오차율, sMAPE) 계산하는 절차입니다. 이 리포트는 {method_count}가지 예측 알고리즘을 "
+         f"모두 백테스트해서 조합마다 오차가 가장 작은 알고리즘을 자동으로 선택합니다."),
+        ("예측신뢰도",
+         "백테스트 오차율 기준입니다 — 10% 이하 높음, 10~25% 보통, 25% 초과 낮음(참고용). 데이터가 너무 적어 "
+         "백테스트 자체가 불가능했던 조합은 'N/A'로 표시하고 보수적으로 과거 평균을 유지합니다."),
+        ("메이커(설비)", "RAWDATA의 '메이커' 컬럼을 설비 제조사 기준 구분으로 사용해 집계했습니다."),
+        ("금액 표기", "모든 금액은 억원 단위로 축약해 표기합니다. (예: 68,535,079,090원 → 685.35억원)"),
+    ]
+
+
 def _smape(actual, pred):
     """대칭 평균절대백분율오차. 0이 섞인 매출 데이터에서도 안정적으로 동작한다."""
     actual = np.asarray(actual, dtype=float)
@@ -540,9 +569,9 @@ def forecast_series(values, n_ahead, season=4, window=4, logger=None, series_nam
 
 
 # =====================================================================
-# 집계 & 예측 실행 (공정 × 모델 × 메이커(설비) 단위)
+# 집계 & 예측 실행 (공정 × 메이커(설비) × 모델 단위)
 # =====================================================================
-COMBO_COLS = ["공정", "모델", "메이커"]
+COMBO_COLS = ["공정", "메이커", "모델"]
 
 
 def period_pivot(df, group_cols, value_col, periods):
@@ -571,14 +600,14 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
     qty_piv = period_pivot(df, COMBO_COLS, "수량", train_periods)
 
     if logger:
-        logger.info(f"공정×모델×메이커 조합 {len(combos)}개에 대해 조합별로 예측을 계산합니다. (기간단위: {gran})")
+        logger.info(f"공정×메이커×모델 조합 {len(combos)}개에 대해 조합별로 예측을 계산합니다. (기간단위: {gran})")
 
     results = []
-    for (proc, model, maker) in combos:
-        key = (proc, model, maker)
+    for (proc, maker, model) in combos:
+        key = (proc, maker, model)
         amt_hist = amt_piv[key].values if key in amt_piv.columns else np.zeros(len(train_periods))
         qty_hist = qty_piv[key].values if key in qty_piv.columns else np.zeros(len(train_periods))
-        series_name = f"{proc}/{model}/{maker}"
+        series_name = f"{proc}/{maker}/{model}"
 
         excluded = proc in exclude_processes
         if excluded:
@@ -596,7 +625,7 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
         baseline_amt = float(np.sum(amt_hist[-baseline_len:])) if baseline_len else 0.0
 
         results.append({
-            "공정": proc, "모델": model, "메이커": maker, "excluded": excluded, "method": method,
+            "공정": proc, "메이커": maker, "모델": model, "excluded": excluded, "method": method,
             "backtest_scores": scores,
             "amt_hist": amt_hist, "qty_hist": qty_hist,
             "amt_fc": amt_fc, "qty_fc": qty_fc,
@@ -604,7 +633,7 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
             "baseline_amt": baseline_amt,
             "diff_amt": float(np.sum(amt_fc)) - baseline_amt,
             "nz_count": int(np.count_nonzero(amt_hist)),
-            "txn_count": int(((df["공정"] == proc) & (df["모델"] == model) & (df["메이커"] == maker) &
+            "txn_count": int(((df["공정"] == proc) & (df["메이커"] == maker) & (df["모델"] == model) &
                                (df["기간"].isin(train_periods))).sum()),
         })
 
@@ -642,7 +671,7 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
 
 
 def dimension_summary(detail, dim_col):
-    """예측이 제외되지 않은 조합들을 지정한 차원(공정/모델/메이커) 기준으로 다시 합산한다."""
+    """예측이 제외되지 않은 조합들을 지정한 차원(공정/메이커/모델) 기준으로 다시 합산한다."""
     active = detail[~detail["excluded"]]
     if not len(active):
         return pd.DataFrame(columns=[dim_col, "직전동기간실적", "예측합계", "증감액", "증감률"])
@@ -741,7 +770,7 @@ def chart_top_contributors(detail, top_n=10):
     d = detail[~detail["excluded"]].copy()
     d = d.reindex(d["diff_amt"].abs().sort_values(ascending=False).index).head(top_n)
     d = d.sort_values("diff_amt")
-    labels = [f"{p}-{m}-{k}" for p, m, k in zip(d["공정"], d["모델"], d["메이커"])]
+    labels = [f"{p}-{k}-{m}" for p, k, m in zip(d["공정"], d["메이커"], d["모델"])]
     values = (d["diff_amt"] / 1e8).tolist()
     colors = [BRAND_MAGENTA if v >= 0 else "#4472C4" for v in values]
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -788,7 +817,6 @@ img {{ max-width:100%; border-radius:8px; box-shadow:0 1px 6px rgba(0,0,0,0.08);
 .conf-high {{ color:#1F7A1F; font-weight:bold; }}
 .conf-mid {{ color:#B8860B; font-weight:bold; }}
 .conf-low {{ color:#C00000; font-weight:bold; }}
-details > summary {{ cursor:pointer; font-weight:bold; color:{magenta}; }}
 code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 </style></head>
 <body><div class="wrap">
@@ -797,20 +825,10 @@ code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 {exclude_note}
 
 <div class="card">
-<details>
-<summary>이 리포트 읽는 법 (클릭하여 펼치기/접기)</summary>
-<div style="font-size:13px; line-height:1.8; margin-top:10px; color:#333;">
-<b>직전 동기간 실적</b>: 예측기간과 길이가 같은 가장 최근 실적기간의 실제 매출입니다. (예: {n_ahead}개 {unit}를 예측하면 직전 {n_ahead}개 {unit}의 실제 실적과 비교합니다)<br>
-<b>조합별 합산 예측(기본)</b>: 공정×모델×메이커 조합 하나하나에 대해, 아래 "백테스트"로 가장 정확했던 알고리즘을 적용해 예측한 값을 모두 더한 값입니다. 이 리포트의 기본 예측치입니다. (예전 표현: 상향식)<br>
-<b>전사 통합 예측(참고)</b>: 조합별로 나누지 않고 전사 매출 전체를 하나로 보고 계절성 모델을 적용한 값입니다. '조합별 합산 예측'과 크게 차이가 나면 특정 조합에 이상치가 섞였을 가능성을 점검해볼 수 있습니다. (예전 표현: 하향식)<br>
-<b>두 예측 중 어느 쪽이 더 큰가요?</b>: 정해진 규칙은 없습니다. 두 방식은 서로 다른 독립적인 계산이라 기간에 따라 어느 한쪽이 더 클 수도, 작을 수도 있습니다. 항상 조합별 합산 예측이 더 크다거나 전사 통합 예측이 더 작다는 보장은 없으니, 아래 상세 데이터표에서 기간별로 직접 비교해보세요.<br>
-<b>백테스트</b>: 과거 데이터를 학습구간과 검증구간으로 나눈 뒤, 학습구간만으로 검증구간을 예측해보고 실제값과 얼마나 차이 나는지(오차율, sMAPE) 계산하는 절차입니다. 이 리포트는 {method_count}가지 예측 알고리즘을 모두 백테스트해서 조합마다 오차가 가장 작은 알고리즘을 자동으로 선택합니다.<br>
-<b>예측신뢰도</b>: 백테스트 오차율 기준입니다 — 10% 이하 <span class="conf-high">높음</span>, 10~25% <span class="conf-mid">보통</span>, 25% 초과 <span class="conf-low">낮음(참고용)</span>. 데이터가 너무 적어 백테스트 자체가 불가능했던 조합은 'N/A'로 표시하고 보수적으로 과거 평균을 유지합니다.<br>
-<b>메이커(설비)</b>: RAWDATA의 '메이커' 컬럼을 설비 제조사 기준 구분으로 사용해 집계했습니다.<br>
-<b>금액 표기</b>: 모든 금액은 억원 단위로 축약해 표기합니다. (예: 68,535,079,090원 → 685.35억원)<br>
-실행 과정 전체와 조합별 백테스트 점수 등 모든 상세 로그는 함께 생성된 텍스트 파일(<code>{log_name}</code>)에서 확인할 수 있습니다(메모장으로 바로 열립니다).
+<h2 style="margin-top:0;border:none;">이 리포트 읽는 법</h2>
+<div style="font-size:13px; line-height:1.8; color:#333;">
+{guide_section}
 </div>
-</details>
 </div>
 
 <div class="summary-box">
@@ -831,14 +849,14 @@ code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 <div class="tablewrap">{proc_table}</div>
 </div>
 
-<div class="card"><h2 style="margin-top:0;border:none;">모델별 실적 대비 예측</h2>
-<img src="data:image/png;base64,{chart_model}"/>
-<div class="tablewrap">{model_table}</div>
-</div>
-
 <div class="card"><h2 style="margin-top:0;border:none;">메이커(설비)별 실적 대비 예측</h2>
 <img src="data:image/png;base64,{chart_maker}"/>
 <div class="tablewrap">{maker_table}</div>
+</div>
+
+<div class="card"><h2 style="margin-top:0;border:none;">모델별 실적 대비 예측</h2>
+<img src="data:image/png;base64,{chart_model}"/>
+<div class="tablewrap">{model_table}</div>
 </div>
 
 <div class="card"><h2 style="margin-top:0;border:none;">증감 기여도 상위 조합</h2>
@@ -847,7 +865,7 @@ code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 <div class="tablewrap">{contributors_table}</div>
 </div>
 
-<h2>공정×모델×메이커 상세 예측 (전체 {n_combo}개 조합)</h2>
+<h2>공정×메이커×모델 상세 예측 (전체 {n_combo}개 조합)</h2>
 <div class="tablewrap">{detail_table}</div>
 
 <h2>예측 방법론 (다중 알고리즘 백테스트)</h2>
@@ -866,6 +884,20 @@ def _pct_cell_html(v):
     cls = "pos" if v >= 0 else "neg"
     sign = "+" if v >= 0 else ""
     return f'<span class="{cls}">{sign}{v*100:.1f}%</span>'
+
+
+def _guide_html(items, log_name):
+    """reader_guide_items()의 내용을 HTML로 렌더링한다 (예측신뢰도 항목만 색상 강조)."""
+    out = []
+    for title, text in items:
+        if title == "예측신뢰도":
+            text = (text.replace("10% 이하 높음", '10% 이하 <span class="conf-high">높음</span>')
+                        .replace("10~25% 보통", '10~25% <span class="conf-mid">보통</span>')
+                        .replace("25% 초과 낮음(참고용)", '25% 초과 <span class="conf-low">낮음(참고용)</span>'))
+        out.append(f"<b>{title}</b>: {text}<br>")
+    out.append(f"실행 과정 전체와 조합별 백테스트 점수 등 모든 상세 로그는 함께 생성된 텍스트 파일"
+               f"(<code>{log_name}</code>)에서 확인할 수 있습니다(메모장으로 바로 열립니다).")
+    return "".join(out)
 
 
 def _dimension_table_html(summary, dim_col, dim_label):
@@ -898,12 +930,12 @@ def _contributors_table_html(detail, top_n=10):
     d = detail[~detail["excluded"]].copy()
     d = d.reindex(d["diff_amt"].abs().sort_values(ascending=False).index).head(top_n)
     rows = "\n".join(
-        f"<tr><td>{r['공정']}</td><td>{r['모델']}</td><td style='text-align:left'>{r['메이커']}</td>"
+        f"<tr><td>{r['공정']}</td><td>{r['메이커']}</td><td style='text-align:left'>{r['모델']}</td>"
         f"<td>{fmt_eok(r['baseline_amt'])}</td><td>{fmt_eok(r['amt_fc_total'])}</td>"
         f"<td class=\"{'pos' if r['diff_amt']>=0 else 'neg'}\">{'+' if r['diff_amt']>=0 else ''}{fmt_eok(r['diff_amt'])}</td></tr>"
         for _, r in d.iterrows()
     )
-    return (f"<table><tr><th>공정</th><th>모델</th><th>메이커(설비)</th><th>직전동기간실적</th>"
+    return (f"<table><tr><th>공정</th><th>메이커(설비)</th><th>모델</th><th>직전동기간실적</th>"
             f"<th>예측합계</th><th>증감액</th></tr>{rows}</table>")
 
 
@@ -920,8 +952,8 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
     total_topdown = float(np.sum(result["total_fc_topdown"]))
 
     proc_summary = dimension_summary(detail, "공정")
-    model_summary = dimension_summary(detail, "모델")
     maker_summary = dimension_summary(detail, "메이커")
+    model_summary = dimension_summary(detail, "모델")
 
     total_fc_bottomup_arr = np.sum(np.stack(active["amt_fc"].values), axis=0) if len(active) else np.zeros(n_ahead)
     chart_total = chart_total_trend(train_periods, result["total_hist"], fc_periods,
@@ -929,13 +961,13 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
     trend_table = _trend_table_html(train_periods, result["total_hist"], fc_periods,
                                      total_fc_bottomup_arr, result["total_fc_topdown"], gran)
     chart_proc = chart_dimension_bar(proc_summary, "공정", "공정별 실적 대비 예측")
-    chart_model = chart_dimension_bar(model_summary, "모델", "모델별 실적 대비 예측")
     chart_maker = chart_dimension_bar(maker_summary, "메이커", "메이커(설비)별 실적 대비 예측")
+    chart_model = chart_dimension_bar(model_summary, "모델", "모델별 실적 대비 예측")
     chart_top = chart_top_contributors(detail)
 
     proc_table = _dimension_table_html(proc_summary, "공정", "공정")
-    model_table = _dimension_table_html(model_summary, "모델", "모델")
     maker_table = _dimension_table_html(maker_summary, "메이커", "메이커(설비)")
+    model_table = _dimension_table_html(model_summary, "모델", "모델")
     contributors_table = _contributors_table_html(detail)
 
     top3 = active.reindex(active["diff_amt"].abs().sort_values(ascending=False).index).head(3)
@@ -950,7 +982,7 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         narrative = (f"설정한 예측기간({fc_periods[0]}~{fc_periods[-1]}) 전사 합계 예측은 {fmt_eok(total_fc)}로, "
                      f"직전 동일 길이 기간 실적({fmt_eok(total_base)}) 대비 {'+' if total_pct>=0 else ''}{total_pct*100:.1f}% "
                      f"{'증가' if total_pct>=0 else '감소'}입니다. 가장 큰 요인은 " +
-                     ", ".join(f"{r['공정']}-{r['모델']}-{r['메이커']}({'+' if r['diff_amt']>=0 else ''}{fmt_eok(r['diff_amt'])})"
+                     ", ".join(f"{r['공정']}-{r['메이커']}-{r['모델']}({'+' if r['diff_amt']>=0 else ''}{fmt_eok(r['diff_amt'])})"
                                for _, r in top3.iterrows()) + " 입니다." + conf_txt)
     else:
         narrative = conf_txt
@@ -960,16 +992,16 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         cls = {"높음": "conf-high", "보통": "conf-mid", "낮음(참고용)": "conf-low"}.get(label, "")
         return f'<span class="{cls}">{label}</span>' if cls else label
 
-    det_sorted = detail.sort_values("amt_fc_total", ascending=False)
+    det_sorted = detail.sort_values(["공정", "메이커", "모델"])
     detail_rows = []
     for _, r in det_sorted.iterrows():
         detail_rows.append(
-            f"<tr><td>{r['공정']}</td><td>{r['모델']}</td><td style='text-align:left'>{r['메이커']}</td>"
+            f"<tr><td>{r['공정']}</td><td>{r['메이커']}</td><td style='text-align:left'>{r['모델']}</td>"
             f"<td>{fmt_eok(r['baseline_amt'])}</td>"
             f"<td>{fmt_eok(r['amt_fc_total'])}</td><td>{r['qty_fc_total']:.1f}</td>"
             f"<td><span class='methodbadge'>{r['method']}</span></td>"
             f"<td>{conf_span(r['backtest_scores'], r['method'])}</td></tr>")
-    detail_table = (f"<table><tr><th>공정</th><th>모델</th><th>메이커(설비)</th><th>직전동기간실적(금액)</th>"
+    detail_table = (f"<table><tr><th>공정</th><th>메이커(설비)</th><th>모델</th><th>직전동기간실적(금액)</th>"
                      f"<th>예측합계(금액)</th><th>예측합계(수량)</th><th>적용알고리즘</th><th>예측신뢰도</th></tr>"
                      f"{''.join(detail_rows)}</table>")
 
@@ -988,12 +1020,13 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         method_lines.append(f"<b>제외(돌발성 매출)</b> ({excl_count}개 조합): {METHOD_DESCRIPTIONS['제외(돌발성 매출)']}")
     method_section = "<br>".join(method_lines)
     method_count = len(build_candidate_methods(result["season"], window))
+    guide_section = _guide_html(reader_guide_items(n_ahead, gran, method_count), log_path.name)
 
     html = HTML_TEMPLATE.format(
         magenta=BRAND_MAGENTA, gray=BRAND_GRAY,
         train_start=train_periods[0], train_end=train_periods[-1],
         fc_start=fc_periods[0], fc_end=fc_periods[-1], src_name=src_name, sheet_name=sheet_name,
-        unit=gran, n_ahead=n_ahead, method_count=method_count,
+        unit=gran, n_ahead=n_ahead, method_count=method_count, guide_section=guide_section,
         exclude_note=exclude_note, log_name=log_path.name,
         total_base_fmt=fmt_eok(total_base), total_fc_fmt=fmt_eok(total_fc),
         total_pct_fmt=(f"{'+' if total_pct>=0 else ''}{total_pct*100:.1f}%" if total_pct is not None else "N/A"),
@@ -1012,42 +1045,25 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         "total_base": total_base, "total_fc": total_fc, "total_pct": total_pct, "total_topdown": total_topdown,
         "chart_total": chart_total, "chart_proc": chart_proc, "chart_model": chart_model,
         "chart_maker": chart_maker, "chart_top": chart_top,
-        "fc_bottomup_arr": total_fc_bottomup_arr,
+        "fc_bottomup_arr": total_fc_bottomup_arr, "narrative": narrative,
     }
     return html, ctx
 
 
 # =====================================================================
-# PDF 리포트 (요약 위주, 가벼운 버전)
+# PDF 리포트 (HTML 리포트와 동일한 내용을 동일한 순서로 담는다)
 # =====================================================================
-def _pdf_dimension_table(pdf, summary, dim_col, header_label):
-    pdf.set_font(pdf.font_family, "", 9)
-    pdf.set_fill_color(200, 0, 124)
-    pdf.set_text_color(255, 255, 255)
-    headers = [header_label, "직전실적", "예측합계", "증감률"]
-    widths = [50, 45, 45, 40]
-    for h, w in zip(headers, widths):
-        pdf.cell(w, 8, h, border=1, align="C", fill=True)
-    pdf.ln()
-    pdf.set_text_color(30, 30, 30)
-    for _, r in summary.iterrows():
-        pct = r["증감률"]
-        pct_s = f"{'+' if pd.notna(pct) and pct>=0 else ''}{pct*100:.1f}%" if pd.notna(pct) else "N/A"
-        pdf.cell(widths[0], 7, str(r[dim_col])[:22], border=1)
-        pdf.cell(widths[1], 7, fmt_eok(r["직전동기간실적"]), border=1, align="R")
-        pdf.cell(widths[2], 7, fmt_eok(r["예측합계"]), border=1, align="R")
-        pdf.cell(widths[3], 7, pct_s, border=1, align="R")
-        pdf.ln()
-
-
 def build_pdf_report(outpath, df, result, src_name, sheet_name, exclude_processes, ctx, log_path):
     from fpdf import FPDF
+    from fpdf.fonts import FontFace
 
     train_periods, fc_periods = result["train_periods"], result["fc_periods"]
     gran, window = result["gran"], result["window"]
     detail = result["detail"]
     total_base, total_fc = ctx["total_base"], ctx["total_fc"]
     total_pct, total_topdown = ctx["total_pct"], ctx["total_topdown"]
+    n_ahead = len(fc_periods)
+    HEADER_FILL = (200, 0, 124)
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -1086,7 +1102,30 @@ def build_pdf_report(outpath, df, result, src_name, sheet_name, exclude_processe
             font_path = None
     if not font_path:
         pdf.set_font("Helvetica", "B", 18)
-    pdf.set_text_color(200, 0, 124)
+
+    def section_title(text):
+        pdf.set_font(pdf.font_family, "", 13)
+        pdf.set_text_color(*HEADER_FILL)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(0, 10, text, ln=True)
+
+    def body_text(text, size=9, color=(60, 60, 60)):
+        pdf.set_font(pdf.font_family, "", size)
+        pdf.set_text_color(*color)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 6, text, align="L")
+
+    def draw_table(rows, col_widths, aligns):
+        pdf.set_font(pdf.font_family, "", 8)
+        pdf.set_text_color(30, 30, 30)
+        with pdf.table(rows, text_align=aligns, col_widths=col_widths,
+                       headings_style=FontFace(family=pdf.font_family, color=255, fill_color=HEADER_FILL)):
+            pass
+        pdf.ln(2)
+
+    # ---- 제목 ----
+    pdf.set_text_color(*HEADER_FILL)
+    pdf.set_font(pdf.font_family, "", 18)
     pdf.cell(0, 12, "매출 예측 리포트", ln=True)
     pdf.set_font(pdf.font_family, "", 10)
     pdf.set_text_color(120, 120, 120)
@@ -1095,104 +1134,113 @@ def build_pdf_report(outpath, df, result, src_name, sheet_name, exclude_processe
     pdf.ln(2)
 
     if exclude_processes:
-        pdf.set_text_color(192, 0, 0)
-        pdf.set_font(pdf.font_family, "", 9)
-        pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(0, 6, f"※ 공정이 {', '.join(exclude_processes)}인 매출은 돌발성(일회성)으로 간주해 예측/합계에서 제외했습니다.")
+        body_text(f"※ 공정이 {', '.join(exclude_processes)}인 매출은 돌발성(일회성)으로 간주해 예측/합계에서 제외했습니다.",
+                   size=9, color=(192, 0, 0))
         pdf.ln(1)
 
-    pdf.set_text_color(30, 30, 30)
-    pdf.set_font(pdf.font_family, "", 11)
     pct_txt = f"{'+' if total_pct is not None and total_pct>=0 else ''}{total_pct*100:.1f}%" if total_pct is not None else "N/A"
-    pdf.set_x(pdf.l_margin)
-    pdf.multi_cell(0, 7, f"전사 직전동기간 실적: {fmt_eok(total_base)}\n"
-                         f"전사 조합별 합산 예측(기본): {fmt_eok(total_fc)}  ({pct_txt})\n"
-                         f"전사 통합 예측(참고): {fmt_eok(total_topdown)}")
+    body_text(f"전사 직전동기간 실적: {fmt_eok(total_base)}\n"
+              f"전사 조합별 합산 예측(기본): {fmt_eok(total_fc)}  ({pct_txt})\n"
+              f"전사 통합 예측(참고): {fmt_eok(total_topdown)}", size=11, color=(30, 30, 30))
     pdf.ln(3)
 
+    # ---- 이 리포트 읽는 법 (HTML과 동일한 문구를 공유) ----
+    pdf.add_page()
+    section_title("이 리포트 읽는 법")
+    method_count = len(build_candidate_methods(result["season"], window))
+    for title, text in reader_guide_items(n_ahead, gran, method_count):
+        pdf.set_font(pdf.font_family, "", 10)
+        pdf.set_text_color(*HEADER_FILL)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 6, title)
+        body_text(text, size=9, color=(60, 60, 60))
+        pdf.ln(1)
+    body_text(f"실행 과정 전체와 조합별 백테스트 점수 등 모든 상세 로그는 함께 생성된 텍스트 파일 "
+              f"({log_path.name})에서 확인할 수 있습니다(메모장으로 바로 열립니다).", size=9, color=(120, 120, 120))
+
+    # ---- 전사 매출 추이 및 예측 (과거 실적을 포함한 전체 기간 표) ----
+    pdf.add_page()
+    section_title("전사 매출 추이 및 예측")
     img1 = io.BytesIO(base64.b64decode(ctx["chart_total"]))
-    pdf.image(img1, w=180)
+    pdf.image(img1, w=190)
     pdf.ln(2)
-
-    pdf.set_font(pdf.font_family, "", 9)
-    pdf.set_fill_color(200, 0, 124)
-    pdf.set_text_color(255, 255, 255)
-    headers = [gran, "조합별 합산(기본)", "전사 통합(참고)"]
-    widths = [40, 65, 65]
-    for h, w in zip(headers, widths):
-        pdf.cell(w, 8, h, border=1, align="C", fill=True)
-    pdf.ln()
-    pdf.set_text_color(30, 30, 30)
+    body_text("실선(회색)은 실적, 마름모(마젠타)는 조합별로 예측해 합산한 조합별 합산 예측(기본) 결과, 파란 점선은 전사 "
+              "데이터 전체에 계절성 모델을 적용한 전사 통합 예측(참고) 결과입니다. 두 방식이 크게 어긋나면 개별 조합의 "
+              "이상치를 의심해볼 수 있습니다. 어느 한쪽이 항상 더 크거나 작다는 규칙은 없으며, 정확한 수치는 아래 표에서 "
+              "확인합니다.")
+    pdf.ln(1)
+    trend_rows = [[gran, "실적", "조합별 합산 예측(기본)", "전사 통합 예측(참고)"]]
+    for period, v in zip(train_periods, result["total_hist"]):
+        trend_rows.append([str(period), fmt_eok(v), "-", "-"])
     for period, bu, td in zip(fc_periods, ctx["fc_bottomup_arr"], result["total_fc_topdown"]):
-        pdf.cell(widths[0], 7, str(period), border=1)
-        pdf.cell(widths[1], 7, fmt_eok(bu), border=1, align="R")
-        pdf.cell(widths[2], 7, fmt_eok(td), border=1, align="R")
-        pdf.ln()
+        trend_rows.append([str(period), "-", fmt_eok(bu), fmt_eok(td)])
+    draw_table(trend_rows, col_widths=(30, 53, 53, 54), aligns=("LEFT", "RIGHT", "RIGHT", "RIGHT"))
 
+    # ---- 공정별 -> 메이커(설비)별 -> 모델별 실적 대비 예측 ----
     for title, summary, dim_col, chart_key, header_label in [
         ("공정별 실적 대비 예측", ctx["proc_summary"], "공정", "chart_proc", "공정"),
-        ("모델별 실적 대비 예측", ctx["model_summary"], "모델", "chart_model", "모델"),
         ("메이커(설비)별 실적 대비 예측", ctx["maker_summary"], "메이커", "chart_maker", "메이커(설비)"),
+        ("모델별 실적 대비 예측", ctx["model_summary"], "모델", "chart_model", "모델"),
     ]:
         pdf.add_page()
-        pdf.set_font(pdf.font_family, "", 13)
-        pdf.set_text_color(200, 0, 124)
-        pdf.cell(0, 10, title, ln=True)
+        section_title(title)
         img = io.BytesIO(base64.b64decode(ctx[chart_key]))
-        pdf.image(img, w=180)
+        pdf.image(img, w=190)
         pdf.ln(2)
-        _pdf_dimension_table(pdf, summary, dim_col, header_label)
+        rows = [[header_label, "직전동기간실적", "예측합계", "증감액", "증감률"]]
+        for _, r in summary.iterrows():
+            pct = r["증감률"]
+            pct_s = f"{'+' if pd.notna(pct) and pct>=0 else ''}{pct*100:.1f}%" if pd.notna(pct) else "N/A"
+            rows.append([str(r[dim_col]), fmt_eok(r["직전동기간실적"]), fmt_eok(r["예측합계"]),
+                         fmt_eok(r["증감액"]), pct_s])
+        draw_table(rows, col_widths=(40, 38, 38, 38, 36), aligns=("LEFT", "RIGHT", "RIGHT", "RIGHT", "RIGHT"))
 
+    # ---- 증감 기여도 상위 조합 ----
     pdf.add_page()
-    pdf.set_font(pdf.font_family, "", 13)
-    pdf.set_text_color(200, 0, 124)
-    pdf.cell(0, 10, "증감 기여도 상위 조합", ln=True)
+    section_title("증감 기여도 상위 조합")
     img3 = io.BytesIO(base64.b64decode(ctx["chart_top"]))
-    pdf.image(img3, w=180)
+    pdf.image(img3, w=190)
     pdf.ln(2)
-
+    body_text(ctx["narrative"])
+    pdf.ln(1)
     top_detail = detail[~detail["excluded"]].copy()
     top_detail = top_detail.reindex(top_detail["diff_amt"].abs().sort_values(ascending=False).index).head(10)
-    pdf.set_font(pdf.font_family, "", 9)
-    pdf.set_fill_color(200, 0, 124)
-    pdf.set_text_color(255, 255, 255)
-    headers = ["공정", "모델", "메이커", "증감액"]
-    widths = [40, 40, 40, 60]
-    for h, w in zip(headers, widths):
-        pdf.cell(w, 8, h, border=1, align="C", fill=True)
-    pdf.ln()
-    pdf.set_text_color(30, 30, 30)
+    rows = [["공정", "메이커(설비)", "모델", "직전동기간실적", "예측합계", "증감액"]]
     for _, r in top_detail.iterrows():
-        pdf.cell(widths[0], 7, str(r["공정"])[:14], border=1)
-        pdf.cell(widths[1], 7, str(r["모델"])[:14], border=1)
-        pdf.cell(widths[2], 7, str(r["메이커"])[:14], border=1)
         sign = "+" if r["diff_amt"] >= 0 else ""
-        pdf.cell(widths[3], 7, f"{sign}{fmt_eok(r['diff_amt'])}", border=1, align="R")
-        pdf.ln()
+        rows.append([str(r["공정"]), str(r["메이커"]), str(r["모델"]), fmt_eok(r["baseline_amt"]),
+                     fmt_eok(r["amt_fc_total"]), f"{sign}{fmt_eok(r['diff_amt'])}"])
+    draw_table(rows, col_widths=(28, 28, 28, 35, 35, 36),
+               aligns=("LEFT", "LEFT", "LEFT", "RIGHT", "RIGHT", "RIGHT"))
 
+    # ---- 공정×메이커×모델 상세 예측 (전체 조합, HTML과 동일하게 생략 없이 전부 표시) ----
     pdf.add_page()
-    pdf.set_font(pdf.font_family, "", 13)
-    pdf.set_text_color(200, 0, 124)
-    pdf.cell(0, 10, "예측 방법론 요약 (다중 알고리즘 백테스트)", ln=True)
-    pdf.set_font(pdf.font_family, "", 10)
-    pdf.set_text_color(30, 30, 30)
+    section_title(f"공정×메이커×모델 상세 예측 (전체 {len(detail)}개 조합)")
+    det_sorted = detail.sort_values(["공정", "메이커", "모델"])
+    rows = [["공정", "메이커", "모델", "직전실적(금액)", "예측합계(금액)", "예측합계(수량)", "적용알고리즘", "신뢰도"]]
+    for _, r in det_sorted.iterrows():
+        conf = confidence_label(r["backtest_scores"], r["method"])
+        rows.append([str(r["공정"]), str(r["메이커"]), str(r["모델"]), fmt_eok(r["baseline_amt"]),
+                     fmt_eok(r["amt_fc_total"]), f"{r['qty_fc_total']:.1f}", r["method"], conf])
+    draw_table(rows, col_widths=(20, 20, 20, 26, 26, 18, 44, 16),
+               aligns=("LEFT", "LEFT", "LEFT", "RIGHT", "RIGHT", "RIGHT", "LEFT", "CENTER"))
+
+    # ---- 예측 방법론 (다중 알고리즘 백테스트) ----
+    pdf.add_page()
+    section_title("예측 방법론 (다중 알고리즘 백테스트)")
+    body_text("이 리포트는 각 조합마다 아래 알고리즘들을 모두 후보로 놓고, 과거 데이터로 백테스트(학습/검증 분리 검증)를 "
+              "수행해 오차(sMAPE)가 가장 작은 알고리즘을 자동으로 선택합니다. 검증할 데이터가 너무 짧은 조합은 표본 "
+              "크기에 맞는 보수적인 방법으로 대체합니다.")
+    pdf.ln(1)
     method_counts = detail[~detail["excluded"]]["method"].value_counts()
-    lines = [f"- {name}: {int(cnt)}개 조합 - {method_description(name, gran, window)}"
-             for name, cnt in method_counts.items()]
+    for name, cnt in method_counts.items():
+        body_text(f"- {name} ({int(cnt)}개 조합): {method_description(name, gran, window)}")
     excl_count = int(detail["excluded"].sum())
     if excl_count:
-        lines.append(f"- 제외(돌발성 매출): {excl_count}개 조합")
-    method_count = len(build_candidate_methods(result["season"], window))
-    lines += [
-        f"- 조합마다 {method_count}개 예측 알고리즘을 과거 데이터로 백테스트하여 오차(sMAPE)가 가장 낮은 알고리즘을 자동 선택했습니다.",
-        "- 모든 예측치는 0 미만이 되지 않도록 하한을 적용했습니다.",
-        "- 모든 금액은 억원 단위로 축약 표기했습니다. (예: 68,535,079,090원 → 685.35억원)",
-        f"- 조합별 백테스트 상세 점수는 실행 로그 파일({log_path.name})에서 확인할 수 있습니다.",
-        "- 상세 조합별 결과와 그래프는 함께 생성된 HTML 리포트에서도 확인하실 수 있습니다.",
-    ]
-    for ln_txt in lines:
-        pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(0, 7, ln_txt)
+        body_text(f"- 제외(돌발성 매출) ({excl_count}개 조합): {METHOD_DESCRIPTIONS['제외(돌발성 매출)']}")
+    pdf.ln(1)
+    body_text(f"모든 예측치는 0 미만이 되지 않도록 하한을 적용했습니다. 조합별 백테스트 상세 점수는 실행 로그 파일"
+              f"({log_path.name})에서 확인할 수 있습니다.")
 
     pdf.output(str(outpath))
 
