@@ -522,6 +522,11 @@ def reader_guide_items(n_ahead, unit, method_count):
          f"예측치가 비정상적으로 튈 수 있습니다. 이를 막기 위해 이런 조합은 한 {unit}의 예측치가 과거 최대 실적의 "
          f"{LOW_CONFIDENCE_CAP_MULTIPLIER:.0f}배를 넘지 않도록 자동으로 상한을 적용하고, 상세표에 '상한적용' "
          f"배지로 표시합니다."),
+        (f"메이커 '{MERGED_MAKER_LABEL}'",
+         f"같은 모델이라도 메이커별로 잘게 쪼개면 매출 이력이 군데군데 끊겨 예측이 불안정해지는 경우가 있습니다. "
+         f"한 (공정, 모델)의 매출 중 메이커가 '미확인'인 비중이 {UNKNOWN_MAKER_MERGE_THRESHOLD*100:.0f}% 이상이면 "
+         f"메이커 정보를 신뢰하기 어렵다고 보고, 메이커 구분 없이 통합해서 예측합니다. 상세표의 메이커 컬럼에 "
+         f"'{MERGED_MAKER_LABEL}'로 표시된 행이 여기 해당합니다."),
     ]
 
 
@@ -669,6 +674,37 @@ def forecast_series(values, n_ahead, season=4, window=4, logger=None, series_nam
 # =====================================================================
 COMBO_COLS = ["공정", "메이커", "모델"]
 
+# 특정 (공정, 모델) 조합의 매출 중 메이커가 "미확인"인 비중이 이 값 이상이면,
+# 그 모델은 메이커 정보를 신뢰할 수 없다고 보고 메이커로 나누지 않은 채
+# (공정, 모델) 단위로 통합해서 예측한다. 메이커 단위로 잘게 쪼갤수록 원래는
+# 꾸준했던 매출 흐름이 군데군데 0으로 끊기는 간헐적인 시계열이 되어 백테스트
+# 오차가 커지고 신뢰도가 떨어지기 때문이다.
+UNKNOWN_MAKER_MERGE_THRESHOLD = 0.15
+MERGED_MAKER_LABEL = "통합(메이커 다수)"
+
+
+def resolve_maker_grouping(df, threshold=UNKNOWN_MAKER_MERGE_THRESHOLD, logger=None):
+    """메이커 미확인 비중이 높은 (공정, 모델) 조합은 메이커 구분 없이 통합 라벨로
+    묶어서, 예측/집계에 쓰이는 '메이커' 컬럼을 대체한 df 복사본을 반환한다.
+    원본 메이커 값은 훼손하지 않고 별도 컬럼으로 보존한다."""
+    df = df.copy()
+    df["메이커_원본"] = df["메이커"]
+
+    pair_totals = df.groupby(["공정", "모델"])["매출액(KRW)"].sum()
+    pair_unknown = df[df["메이커"] == "미확인"].groupby(["공정", "모델"])["매출액(KRW)"].sum()
+    unk_share = (pair_unknown / pair_totals).reindex(pair_totals.index).fillna(0.0)
+    merge_keys = set(unk_share[unk_share >= threshold].index)
+
+    if merge_keys:
+        idx = pd.MultiIndex.from_frame(df[["공정", "모델"]])
+        mask = idx.isin(merge_keys)
+        df.loc[mask, "메이커"] = MERGED_MAKER_LABEL
+        if logger:
+            for proc, model in sorted(merge_keys):
+                logger.info(f"[{proc}/{model}] 메이커 미확인 비중 {unk_share[(proc, model)]*100:.0f}% >= "
+                            f"{threshold*100:.0f}% → 메이커 구분 없이 '{MERGED_MAKER_LABEL}'로 통합해 예측합니다.")
+    return df, merge_keys
+
 
 def period_pivot(df, group_cols, value_col, periods):
     idx_p = pd.CategoricalDtype(periods, ordered=True)
@@ -688,6 +724,8 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
     train_periods = period_range(train_start, train_end, gran)
     fc_periods = period_range(forecast_start, forecast_end, gran)
     n_ahead = len(fc_periods)
+
+    df, maker_merge_keys = resolve_maker_grouping(df, logger=logger)
 
     combos = sorted(df.groupby(COMBO_COLS).size().index.tolist())
     processes = sorted(df["공정"].unique().tolist())
@@ -764,6 +802,7 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
         "total_method_topdown": total_method_topdown,
         "proc_topdown": proc_topdown,
         "amt_piv": amt_piv,
+        "maker_merge_keys": maker_merge_keys,
     }
 
 
@@ -921,6 +960,7 @@ code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 <h1>매출 예측 리포트</h1>
 <div class="meta">학습기간: {train_start} ~ {train_end} &nbsp;|&nbsp; 예측기간: {fc_start} ~ {fc_end} &nbsp;|&nbsp; 기간단위: {unit} &nbsp;|&nbsp; 생성 파일: {src_name} ({sheet_name} 시트)</div>
 {exclude_note}
+{maker_merge_note}
 
 <div class="card">
 <h2 style="margin-top:0;border:none;">이 리포트 읽는 법</h2>
@@ -1137,13 +1177,23 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         annual_note = (f" 다만 {years_txt}년은 실제 데이터가 연간 합계 형태로만 존재해 "
                         f"선택한 기간단위({gran}) 대신 <b>년</b> 단위로 요약해 표시했습니다.")
 
+    maker_merge_keys = result.get("maker_merge_keys") or set()
+    maker_merge_note = ""
+    if maker_merge_keys:
+        items_txt = ", ".join(f"{proc}-{model}" for proc, model in sorted(maker_merge_keys))
+        maker_merge_note = (
+            f'<div class="note">{len(maker_merge_keys)}개 공정×모델({items_txt})은 매출의 상당 부분에서 '
+            f"메이커 정보가 '미확인'으로 남아 있어, 메이커별로 나누면 오히려 예측이 불안정해집니다. "
+            f"이런 경우 메이커 구분 없이 <b>'{MERGED_MAKER_LABEL}'</b>로 통합해 예측했습니다 "
+            f"(상세표의 메이커 컬럼에서 확인 가능).</div>")
+
     html = HTML_TEMPLATE.format(
         magenta=BRAND_MAGENTA, gray=BRAND_GRAY,
         train_start=train_periods[0], train_end=train_periods[-1],
         fc_start=fc_periods[0], fc_end=fc_periods[-1], src_name=src_name, sheet_name=sheet_name,
         unit=gran, n_ahead=n_ahead, method_count=method_count, guide_section=guide_section,
         annual_note=annual_note,
-        exclude_note=exclude_note, log_name=log_path.name,
+        exclude_note=exclude_note, maker_merge_note=maker_merge_note, log_name=log_path.name,
         total_base_fmt=fmt_eok(total_base), total_fc_fmt=fmt_eok(total_fc),
         total_pct_fmt=(f"{'+' if total_pct>=0 else ''}{total_pct*100:.1f}%" if total_pct is not None else "N/A"),
         total_topdown_fmt=fmt_eok(total_topdown), topdown_method=result["total_method_topdown"],
@@ -1163,7 +1213,7 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         "chart_maker": chart_maker, "chart_top": chart_top,
         "fc_bottomup_arr": total_fc_bottomup_arr, "narrative": narrative,
         "display_train_periods": display_train_periods, "display_total_hist": display_total_hist,
-        "annual_only_years": annual_only_years,
+        "annual_only_years": annual_only_years, "maker_merge_keys": maker_merge_keys,
     }
     return html, ctx
 
@@ -1253,6 +1303,14 @@ def build_pdf_report(outpath, df, result, src_name, sheet_name, exclude_processe
 
     if exclude_processes:
         body_text(f"※ 공정이 {', '.join(exclude_processes)}인 매출은 돌발성(일회성)으로 간주해 예측/합계에서 제외했습니다.",
+                   size=9, color=(192, 0, 0))
+        pdf.ln(1)
+
+    maker_merge_keys = ctx.get("maker_merge_keys") or set()
+    if maker_merge_keys:
+        items_txt = ", ".join(f"{proc}-{model}" for proc, model in sorted(maker_merge_keys))
+        body_text(f"※ {len(maker_merge_keys)}개 공정×모델({items_txt})은 메이커 정보가 상당 부분 '미확인'이라 "
+                  f"메이커 구분 없이 '{MERGED_MAKER_LABEL}'로 통합해 예측했습니다.",
                    size=9, color=(192, 0, 0))
         pdf.ln(1)
 
