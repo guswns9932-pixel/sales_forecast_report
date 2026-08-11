@@ -459,9 +459,29 @@ def simple_mean_forecast(values, n_ahead):
     return np.full(n_ahead, max(0.0, base))
 
 
+LOG_METHOD_PREFIX = "로그변환 "
+
+
+def log_transform_forecast(fn):
+    """주어진 예측함수를 log1p 변환 공간에서 적용하도록 감싼다. 매출액처럼 오른쪽으로
+    치우친(가끔 초고액 단발 거래가 섞인) 데이터에서, 그런 값들이 추세·평균 추정에 과도한
+    영향을 주지 않도록 완화해준다. 예측 후에는 다시 원래 단위로 되돌린다(expm1)."""
+    def wrapped(v, h):
+        v = np.asarray(v, dtype=float)
+        log_v = np.log1p(np.maximum(v, 0.0))
+        fc_log = fn(log_v, h)
+        if fc_log is None:
+            return None
+        fc_log = np.asarray(fc_log, dtype=float)
+        return np.expm1(np.maximum(fc_log, 0.0))
+    return wrapped
+
+
 def build_candidate_methods(season, window):
     """기간 단위(계절 주기 season, 이동평균 창 window)에 맞는 예측 알고리즘 후보를 구성한다.
-    년 단위처럼 계절성을 정의할 수 없는(season < 2) 경우 계절성 알고리즘은 제외한다."""
+    년 단위처럼 계절성을 정의할 수 없는(season < 2) 경우 계절성 알고리즘은 제외한다.
+    추세/평균 계열 방법은 로그변환 버전도 함께 후보로 추가해, 오른쪽으로 치우친(초고액
+    단발 거래가 섞인) 매출 데이터에도 잘 맞는 방법을 백테스트로 자동 선택할 수 있게 한다."""
     methods = {
         "선형추세": lambda v, h: linear_trend_forecast(v, h),
         "이동평균": lambda v, h: moving_average_forecast(v, h, window),
@@ -471,6 +491,13 @@ def build_candidate_methods(season, window):
     if season and season >= 2:
         methods["계절성 지수평활(Holt-Winters)"] = lambda v, h: seasonal_ets_forecast(v, h, season)
         methods["계절성 단순모형(전년동기)"] = lambda v, h: seasonal_naive_forecast(v, h, season)
+
+    log_targets = ["선형추세", "이동평균", "평균유지"]
+    if season and season >= 2:
+        log_targets.append("계절성 지수평활(Holt-Winters)")
+    for name in log_targets:
+        methods[f"{LOG_METHOD_PREFIX}{name}"] = log_transform_forecast(methods[name])
+
     return methods
 
 
@@ -487,6 +514,11 @@ METHOD_DESCRIPTIONS = {
 
 
 def method_description(name, gran, window):
+    if name.startswith(LOG_METHOD_PREFIX):
+        base = name[len(LOG_METHOD_PREFIX):]
+        base_desc = METHOD_DESCRIPTIONS.get(base, "선정된 통계적 방법으로 예측했습니다.").format(unit=gran, window=window)
+        return (base_desc + " 다만 매출액을 로그변환한 뒤 학습하고 다시 원래 단위로 되돌리는 방식이라, "
+                "가끔 나오는 초고액 단발 거래가 추세·평균 추정에 과도한 영향을 주지 않습니다.")
     tmpl = METHOD_DESCRIPTIONS.get(name, "선정된 통계적 방법으로 예측했습니다.")
     return tmpl.format(unit=gran, window=window)
 
