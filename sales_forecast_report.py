@@ -14,7 +14,8 @@ RAWDATA 엑셀(매출일/모델/반입라인/공정/메이커/수량/단가/매�
   - 여러 예측 알고리즘(계절성 지수평활, Croston-SBA 간헐수요모델, 선형추세,
     이동평균, 계절성 단순모형, 평균유지)을 실제 로우데이터로 백테스트하여
     조합마다 가장 정합성 높은(오차가 가장 작은) 알고리즘을 자동 선택
-  - 리포트 그래프에 값(데이터 레이블)을 함께 표기
+  - 리포트 그래프는 값이 겹쳐 읽기 어렵지 않도록 단순하게 유지하고, 정확한 값은 그래프 아래
+    표에서 과거 실적까지 포함해 확인
   - 리포트의 모든 금액은 "685.35억원"처럼 억원 단위로 축약 표기
   - 실행 전 과정(백테스트 점수, 선택 근거, 데이터 처리 내역 등)을 메모장으로
     바로 열어볼 수 있는 텍스트 로그 파일로 저장
@@ -667,7 +668,7 @@ def fmt_eok_num(v, decimals=2):
 
 
 # =====================================================================
-# 차트 (데이터 레이블 포함)
+# 차트 (그래프는 값이 겹치지 않도록 단순하게 유지하고, 정확한 수치는 아래 표로 제공)
 # =====================================================================
 def _fig_to_base64(fig):
     buf = io.BytesIO()
@@ -690,15 +691,8 @@ def chart_total_trend(train_periods, total_hist, fc_periods, total_fc_bottomup, 
     ax.plot([n_hist - 1, n_hist], [total_hist[-1], total_fc_bottomup[0]], color=BRAND_MAGENTA, linewidth=1, alpha=0.5)
     ax.plot([n_hist - 1, n_hist], [total_hist[-1], total_fc_topdown[0]], color="#1f77b4", linewidth=1, alpha=0.5, linestyle="--")
 
-    # 예측 구간 데이터 레이블 (조합별 합산은 위쪽, 전사 통합은 아래쪽 - 겹침을 줄이기 위함.
-    # 그래프만으로 겹쳐 읽기 어려운 정확한 수치는 아래 표에서 확인 가능)
-    for x, y in zip(fc_x, total_fc_bottomup):
-        ax.annotate(f"{y/1e8:,.1f}억", (x, y), textcoords="offset points", xytext=(0, 9),
-                    ha="center", fontsize=7, color=BRAND_MAGENTA)
-    for x, y in zip(fc_x, total_fc_topdown):
-        ax.annotate(f"{y/1e8:,.1f}억", (x, y), textcoords="offset points", xytext=(0, -12),
-                    ha="center", fontsize=7, color="#1f77b4")
-
+    # 기간이 많아 그래프에 값을 전부 표기하면 겹쳐서 읽기 어려우므로, 데이터 레이블 대신
+    # 아래 상세 데이터표(모든 기간의 실적/예측 값)로 정확한 수치를 제공한다.
     all_labels = list(train_periods) + list(fc_periods)
     step = max(1, len(all_labels) // 16)
     ax.set_xticks(range(0, len(all_labels), step))
@@ -729,10 +723,9 @@ def chart_dimension_bar(summary, dim_col, title, top_n=15):
     w = 0.38
     h1 = (s["직전동기간실적"] / 1e8).tolist()
     h2 = (s["예측합계"] / 1e8).tolist()
-    bars1 = ax.bar(x - w / 2, h1, width=w, color=BRAND_GRAY, label="직전 동기간 실적")
-    bars2 = ax.bar(x + w / 2, h2, width=w, color=BRAND_MAGENTA, label="예측")
-    ax.bar_label(bars1, labels=[f"{v:,.1f}" for v in h1], fontsize=7, padding=2, color="#555")
-    ax.bar_label(bars2, labels=[f"{v:,.1f}" for v in h2], fontsize=7, padding=2, color=BRAND_MAGENTA)
+    ax.bar(x - w / 2, h1, width=w, color=BRAND_GRAY, label="직전 동기간 실적")
+    ax.bar(x + w / 2, h2, width=w, color=BRAND_MAGENTA, label="예측")
+    # 데이터 레이블 대신 아래 표에서 정확한 수치를 확인할 수 있다.
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
     ax.set_ylabel("억원")
@@ -751,8 +744,8 @@ def chart_top_contributors(detail, top_n=10):
     values = (d["diff_amt"] / 1e8).tolist()
     colors = [BRAND_MAGENTA if v >= 0 else "#4472C4" for v in values]
     fig, ax = plt.subplots(figsize=(9, 5))
-    bars = ax.barh(labels, values, color=colors)
-    ax.bar_label(bars, labels=[f"{v:+,.1f}" for v in values], fontsize=7, padding=3)
+    ax.barh(labels, values, color=colors)
+    # 데이터 레이블 대신 아래 표에서 정확한 수치를 확인할 수 있다.
     ax.set_xlabel("증감 기여액 (억원)")
     ax.set_title(f"증감 기여도 상위 {top_n}개 조합", fontsize=12, color=BRAND_MAGENTA, fontweight="bold")
     ax.grid(alpha=0.25, axis="x")
@@ -774,6 +767,9 @@ h2 {{ color:{magenta}; font-size:18px; margin-top:40px; border-bottom:2px solid 
 .meta {{ color:{gray}; font-size:13px; margin-bottom:24px;}}
 .note {{ color:#C00000; font-size:13px; background:#FFF4F4; padding:10px 14px; border-radius:6px; margin:12px 0;}}
 .tablewrap {{ overflow-x:auto; }}
+.scrolltable {{ overflow:auto; max-height:420px; border:1px solid #eee; border-radius:6px; }}
+.scrolltable table {{ margin:0; }}
+.scrolltable th {{ position:sticky; top:0; z-index:1; }}
 table {{ border-collapse: collapse; width:100%; margin:14px 0; font-size:13px;}}
 th {{ background:{magenta}; color:white; padding:8px 10px; text-align:center; white-space:nowrap;}}
 td {{ padding:7px 10px; border-bottom:1px solid #eee; text-align:right; white-space:nowrap;}}
@@ -806,6 +802,7 @@ code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 <b>직전 동기간 실적</b>: 예측기간과 길이가 같은 가장 최근 실적기간의 실제 매출입니다. (예: {n_ahead}개 {unit}를 예측하면 직전 {n_ahead}개 {unit}의 실제 실적과 비교합니다)<br>
 <b>조합별 합산 예측(기본)</b>: 공정×모델×메이커 조합 하나하나에 대해, 아래 "백테스트"로 가장 정확했던 알고리즘을 적용해 예측한 값을 모두 더한 값입니다. 이 리포트의 기본 예측치입니다. (예전 표현: 상향식)<br>
 <b>전사 통합 예측(참고)</b>: 조합별로 나누지 않고 전사 매출 전체를 하나로 보고 계절성 모델을 적용한 값입니다. '조합별 합산 예측'과 크게 차이가 나면 특정 조합에 이상치가 섞였을 가능성을 점검해볼 수 있습니다. (예전 표현: 하향식)<br>
+<b>두 예측 중 어느 쪽이 더 큰가요?</b>: 정해진 규칙은 없습니다. 두 방식은 서로 다른 독립적인 계산이라 기간에 따라 어느 한쪽이 더 클 수도, 작을 수도 있습니다. 항상 조합별 합산 예측이 더 크다거나 전사 통합 예측이 더 작다는 보장은 없으니, 아래 상세 데이터표에서 기간별로 직접 비교해보세요.<br>
 <b>백테스트</b>: 과거 데이터를 학습구간과 검증구간으로 나눈 뒤, 학습구간만으로 검증구간을 예측해보고 실제값과 얼마나 차이 나는지(오차율, sMAPE) 계산하는 절차입니다. 이 리포트는 {method_count}가지 예측 알고리즘을 모두 백테스트해서 조합마다 오차가 가장 작은 알고리즘을 자동으로 선택합니다.<br>
 <b>예측신뢰도</b>: 백테스트 오차율 기준입니다 — 10% 이하 <span class="conf-high">높음</span>, 10~25% <span class="conf-mid">보통</span>, 25% 초과 <span class="conf-low">낮음(참고용)</span>. 데이터가 너무 적어 백테스트 자체가 불가능했던 조합은 'N/A'로 표시하고 보수적으로 과거 평균을 유지합니다.<br>
 <b>메이커(설비)</b>: RAWDATA의 '메이커' 컬럼을 설비 제조사 기준 구분으로 사용해 집계했습니다.<br>
@@ -824,7 +821,7 @@ code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 
 <div class="card"><h2 style="margin-top:0;border:none;">전사 매출 추이 및 예측</h2>
 <img src="data:image/png;base64,{chart_total}"/>
-<p style="font-size:13px;color:{gray}">실선(회색)은 실적, 마름모(마젠타)는 조합별로 예측해 합산한 <b>조합별 합산 예측(기본)</b> 결과, 파란 점선은 전사 데이터 전체에 계절성 모델을 적용한 <b>전사 통합 예측(참고)</b> 결과입니다. 두 방식이 크게 어긋나면 개별 조합의 이상치를 의심해볼 수 있습니다. 그래프의 예측 구간 값 레이블이 겹쳐 보이기 어려운 경우, 아래 상세 데이터표에서 정확한 수치를 확인할 수 있습니다.</p>
+<p style="font-size:13px;color:{gray}">실선(회색)은 실적, 마름모(마젠타)는 조합별로 예측해 합산한 <b>조합별 합산 예측(기본)</b> 결과, 파란 점선은 전사 데이터 전체에 계절성 모델을 적용한 <b>전사 통합 예측(참고)</b> 결과입니다. 두 방식이 크게 어긋나면 개별 조합의 이상치를 의심해볼 수 있습니다. 어느 한쪽이 항상 더 크거나 작다는 규칙은 없으며, 정확한 수치는 그래프 대신 아래 표에서 확인합니다.</p>
 {trend_table}
 </div>
 
@@ -846,6 +843,7 @@ code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 <div class="card"><h2 style="margin-top:0;border:none;">증감 기여도 상위 조합</h2>
 <img src="data:image/png;base64,{chart_top}"/>
 <p style="font-size:13px;color:{gray}">{narrative}</p>
+<div class="tablewrap">{contributors_table}</div>
 </div>
 
 <h2>공정×모델×메이커 상세 예측 (전체 {n_combo}개 조합)</h2>
@@ -880,8 +878,8 @@ def _dimension_table_html(summary, dim_col, dim_label):
 
 
 def _trend_table_html(train_periods, total_hist, fc_periods, total_fc_bottomup, total_fc_topdown, unit):
-    """전사 추이 그래프는 기간이 많아 모든 점에 값을 표기하기 어려우므로,
-    그래프 아래에서 펼쳐볼 수 있는 기간별 상세 수치표를 만든다."""
+    """전사 추이 그래프는 기간이 많아 그래프 위에 값을 전부 표기하기 어려우므로,
+    그래프 바로 아래에 과거 실적을 포함한 기간별 상세 수치표를 항상 표시한다."""
     rows = []
     for period, v in zip(train_periods, total_hist):
         rows.append(f"<tr><td>{period}</td><td>{fmt_eok(v)}</td><td>-</td><td>-</td></tr>")
@@ -890,8 +888,22 @@ def _trend_table_html(train_periods, total_hist, fc_periods, total_fc_bottomup, 
     n_total = len(train_periods) + len(fc_periods)
     table = (f"<table><tr><th>{unit}</th><th>실적</th><th>조합별 합산 예측(기본)</th><th>전사 통합 예측(참고)</th></tr>"
              f"{''.join(rows)}</table>")
-    return (f"<details><summary>{unit}별 상세 데이터표 보기 (전체 {n_total}개 구간, 클릭하여 펼치기/접기)</summary>"
-            f"<div class=\"tablewrap\" style=\"margin-top:10px;\">{table}</div></details>")
+    return (f'<div style="font-size:12px;color:#888;margin:10px 0 4px;">{unit}별 상세 데이터표 (전체 {n_total}개 구간)</div>'
+            f'<div class="scrolltable">{table}</div>')
+
+
+def _contributors_table_html(detail, top_n=10):
+    """증감 기여도 상위 조합 그래프에 대응하는 상세 수치표."""
+    d = detail[~detail["excluded"]].copy()
+    d = d.reindex(d["diff_amt"].abs().sort_values(ascending=False).index).head(top_n)
+    rows = "\n".join(
+        f"<tr><td>{r['공정']}</td><td>{r['모델']}</td><td style='text-align:left'>{r['메이커']}</td>"
+        f"<td>{fmt_eok(r['baseline_amt'])}</td><td>{fmt_eok(r['amt_fc_total'])}</td>"
+        f"<td class=\"{'pos' if r['diff_amt']>=0 else 'neg'}\">{'+' if r['diff_amt']>=0 else ''}{fmt_eok(r['diff_amt'])}</td></tr>"
+        for _, r in d.iterrows()
+    )
+    return (f"<table><tr><th>공정</th><th>모델</th><th>메이커(설비)</th><th>직전동기간실적</th>"
+            f"<th>예측합계</th><th>증감액</th></tr>{rows}</table>")
 
 
 def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_path):
@@ -923,6 +935,7 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
     proc_table = _dimension_table_html(proc_summary, "공정", "공정")
     model_table = _dimension_table_html(model_summary, "모델", "모델")
     maker_table = _dimension_table_html(maker_summary, "메이커", "메이커(설비)")
+    contributors_table = _contributors_table_html(detail)
 
     top3 = active.reindex(active["diff_amt"].abs().sort_values(ascending=False).index).head(3)
     conf_counts = active.apply(lambda r: confidence_label(r["backtest_scores"], r["method"]), axis=1).value_counts() \
@@ -987,6 +1000,7 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         chart_total=chart_total, chart_proc=chart_proc, chart_model=chart_model, chart_maker=chart_maker,
         chart_top=chart_top, trend_table=trend_table,
         proc_table=proc_table, model_table=model_table, maker_table=maker_table,
+        contributors_table=contributors_table,
         narrative=narrative,
         n_combo=len(detail), detail_table=detail_table,
         method_section=method_section,
@@ -1134,6 +1148,26 @@ def build_pdf_report(outpath, df, result, src_name, sheet_name, exclude_processe
     pdf.cell(0, 10, "증감 기여도 상위 조합", ln=True)
     img3 = io.BytesIO(base64.b64decode(ctx["chart_top"]))
     pdf.image(img3, w=180)
+    pdf.ln(2)
+
+    top_detail = detail[~detail["excluded"]].copy()
+    top_detail = top_detail.reindex(top_detail["diff_amt"].abs().sort_values(ascending=False).index).head(10)
+    pdf.set_font(pdf.font_family, "", 9)
+    pdf.set_fill_color(200, 0, 124)
+    pdf.set_text_color(255, 255, 255)
+    headers = ["공정", "모델", "메이커", "증감액"]
+    widths = [40, 40, 40, 60]
+    for h, w in zip(headers, widths):
+        pdf.cell(w, 8, h, border=1, align="C", fill=True)
+    pdf.ln()
+    pdf.set_text_color(30, 30, 30)
+    for _, r in top_detail.iterrows():
+        pdf.cell(widths[0], 7, str(r["공정"])[:14], border=1)
+        pdf.cell(widths[1], 7, str(r["모델"])[:14], border=1)
+        pdf.cell(widths[2], 7, str(r["메이커"])[:14], border=1)
+        sign = "+" if r["diff_amt"] >= 0 else ""
+        pdf.cell(widths[3], 7, f"{sign}{fmt_eok(r['diff_amt'])}", border=1, align="R")
+        pdf.ln()
 
     pdf.add_page()
     pdf.set_font(pdf.font_family, "", 13)
