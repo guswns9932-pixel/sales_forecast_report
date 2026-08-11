@@ -337,6 +337,46 @@ def build_period_axis(df, gran, extra_future_periods=0):
     return periods
 
 
+def detect_annual_only_years(df, gran):
+    """gran이 '년'이 아닐 때, 실제 거래가 한 해 안에서 단 하나의 하위 기간에만 몰려 있는
+    연도를 찾는다. (예: 오래된 데이터가 연간 합계 한 건으로만 입력된 경우) 이런 연도는
+    그래프/표에서 선택한 기간단위 대신 '년' 단위로 요약해 보여준다."""
+    if gran == "년":
+        return set()
+    years = df["매출일"].dt.year
+    annual_years = set()
+    for y in years.unique():
+        n_periods = df.loc[years == y, "기간"].nunique()
+        if n_periods <= 1:
+            annual_years.add(int(y))
+    return annual_years
+
+
+def collapse_annual_periods(periods, values, gran, annual_only_years):
+    """실적(과거) 축에서 annual_only_years에 해당하는 연속 구간을 연 단위 합계 하나로 합친다.
+    예측(미래) 구간은 그대로 두고, 실적 표시에만 적용한다."""
+    if gran == "년" or not annual_only_years:
+        return list(periods), list(values)
+    out_periods, out_values = [], []
+    i, n = 0, len(periods)
+    while i < n:
+        y, _ = parse_period(periods[i], gran)
+        if y in annual_only_years:
+            total = 0.0
+            j = i
+            while j < n and parse_period(periods[j], gran)[0] == y:
+                total += values[j]
+                j += 1
+            out_periods.append(str(y))
+            out_values.append(total)
+            i = j
+        else:
+            out_periods.append(periods[i])
+            out_values.append(values[i])
+            i += 1
+    return out_periods, out_values
+
+
 # =====================================================================
 # 예측 알고리즘 후보
 # =====================================================================
@@ -499,6 +539,18 @@ def confidence_label(scores, method):
     if s <= 0.25:
         return "보통"
     return "낮음(참고용)"
+
+
+CONFIDENCE_RANK = {"높음": 0, "보통": 1, "낮음(참고용)": 2, "N/A": 3}
+
+
+def sort_detail_table(detail):
+    """공정×메이커×모델 상세 예측표 정렬 기준: 예측수량 많음→적음, 동률이면 예측신뢰도 높음→낮음."""
+    d = detail.copy()
+    conf_rank = d.apply(
+        lambda r: CONFIDENCE_RANK.get(confidence_label(r["backtest_scores"], r["method"]), 3), axis=1)
+    d = d.assign(_conf_rank=conf_rank)
+    return d.sort_values(["qty_fc_total", "_conf_rank"], ascending=[False, True]).drop(columns="_conf_rank")
 
 
 def forecast_series(values, n_ahead, season=4, window=4, logger=None, series_name="", min_intermittent_obs=3):
@@ -840,7 +892,7 @@ code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 
 <div class="card"><h2 style="margin-top:0;border:none;">전사 매출 추이 및 예측</h2>
 <img src="data:image/png;base64,{chart_total}"/>
-<p style="font-size:13px;color:{gray}">실선(회색)은 실적, 마름모(마젠타)는 조합별로 예측해 합산한 <b>조합별 합산 예측(기본)</b> 결과, 파란 점선은 전사 데이터 전체에 계절성 모델을 적용한 <b>전사 통합 예측(참고)</b> 결과입니다. 두 방식이 크게 어긋나면 개별 조합의 이상치를 의심해볼 수 있습니다. 어느 한쪽이 항상 더 크거나 작다는 규칙은 없으며, 정확한 수치는 그래프 대신 아래 표에서 확인합니다.</p>
+<p style="font-size:13px;color:{gray}">실선(회색)은 실적, 마름모(마젠타)는 조합별로 예측해 합산한 <b>조합별 합산 예측(기본)</b> 결과, 파란 점선은 전사 데이터 전체에 계절성 모델을 적용한 <b>전사 통합 예측(참고)</b> 결과입니다. 두 방식이 크게 어긋나면 개별 조합의 이상치를 의심해볼 수 있습니다. 어느 한쪽이 항상 더 크거나 작다는 규칙은 없으며, 정확한 수치는 그래프 대신 아래 표에서 확인합니다.{annual_note}</p>
 {trend_table}
 </div>
 
@@ -956,9 +1008,14 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
     model_summary = dimension_summary(detail, "모델")
 
     total_fc_bottomup_arr = np.sum(np.stack(active["amt_fc"].values), axis=0) if len(active) else np.zeros(n_ahead)
-    chart_total = chart_total_trend(train_periods, result["total_hist"], fc_periods,
+
+    annual_only_years = detect_annual_only_years(df, gran)
+    display_train_periods, display_total_hist = collapse_annual_periods(
+        train_periods, list(result["total_hist"]), gran, annual_only_years)
+
+    chart_total = chart_total_trend(display_train_periods, display_total_hist, fc_periods,
                                      total_fc_bottomup_arr, result["total_fc_topdown"], gran)
-    trend_table = _trend_table_html(train_periods, result["total_hist"], fc_periods,
+    trend_table = _trend_table_html(display_train_periods, display_total_hist, fc_periods,
                                      total_fc_bottomup_arr, result["total_fc_topdown"], gran)
     chart_proc = chart_dimension_bar(proc_summary, "공정", "공정별 실적 대비 예측")
     chart_maker = chart_dimension_bar(maker_summary, "메이커", "메이커(설비)별 실적 대비 예측")
@@ -992,7 +1049,7 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         cls = {"높음": "conf-high", "보통": "conf-mid", "낮음(참고용)": "conf-low"}.get(label, "")
         return f'<span class="{cls}">{label}</span>' if cls else label
 
-    det_sorted = detail.sort_values(["공정", "메이커", "모델"])
+    det_sorted = sort_detail_table(detail)
     detail_rows = []
     for _, r in det_sorted.iterrows():
         detail_rows.append(
@@ -1022,11 +1079,18 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
     method_count = len(build_candidate_methods(result["season"], window))
     guide_section = _guide_html(reader_guide_items(n_ahead, gran, method_count), log_path.name)
 
+    annual_note = ""
+    if annual_only_years:
+        years_txt = ", ".join(str(y) for y in sorted(annual_only_years))
+        annual_note = (f" 다만 {years_txt}년은 실제 데이터가 연간 합계 형태로만 존재해 "
+                        f"선택한 기간단위({gran}) 대신 <b>년</b> 단위로 요약해 표시했습니다.")
+
     html = HTML_TEMPLATE.format(
         magenta=BRAND_MAGENTA, gray=BRAND_GRAY,
         train_start=train_periods[0], train_end=train_periods[-1],
         fc_start=fc_periods[0], fc_end=fc_periods[-1], src_name=src_name, sheet_name=sheet_name,
         unit=gran, n_ahead=n_ahead, method_count=method_count, guide_section=guide_section,
+        annual_note=annual_note,
         exclude_note=exclude_note, log_name=log_path.name,
         total_base_fmt=fmt_eok(total_base), total_fc_fmt=fmt_eok(total_fc),
         total_pct_fmt=(f"{'+' if total_pct>=0 else ''}{total_pct*100:.1f}%" if total_pct is not None else "N/A"),
@@ -1046,6 +1110,8 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         "chart_total": chart_total, "chart_proc": chart_proc, "chart_model": chart_model,
         "chart_maker": chart_maker, "chart_top": chart_top,
         "fc_bottomup_arr": total_fc_bottomup_arr, "narrative": narrative,
+        "display_train_periods": display_train_periods, "display_total_hist": display_total_hist,
+        "annual_only_years": annual_only_years,
     }
     return html, ctx
 
@@ -1164,13 +1230,19 @@ def build_pdf_report(outpath, df, result, src_name, sheet_name, exclude_processe
     img1 = io.BytesIO(base64.b64decode(ctx["chart_total"]))
     pdf.image(img1, w=190)
     pdf.ln(2)
+    annual_years = ctx.get("annual_only_years") or set()
+    annual_note = ""
+    if annual_years:
+        years_txt = ", ".join(str(y) for y in sorted(annual_years))
+        annual_note = (f" 다만 {years_txt}년은 실제 데이터가 연간 합계 형태로만 존재해 "
+                        f"선택한 기간단위({gran}) 대신 년 단위로 요약해 표시했습니다.")
     body_text("실선(회색)은 실적, 마름모(마젠타)는 조합별로 예측해 합산한 조합별 합산 예측(기본) 결과, 파란 점선은 전사 "
               "데이터 전체에 계절성 모델을 적용한 전사 통합 예측(참고) 결과입니다. 두 방식이 크게 어긋나면 개별 조합의 "
               "이상치를 의심해볼 수 있습니다. 어느 한쪽이 항상 더 크거나 작다는 규칙은 없으며, 정확한 수치는 아래 표에서 "
-              "확인합니다.")
+              "확인합니다." + annual_note)
     pdf.ln(1)
     trend_rows = [[gran, "실적", "조합별 합산 예측(기본)", "전사 통합 예측(참고)"]]
-    for period, v in zip(train_periods, result["total_hist"]):
+    for period, v in zip(ctx["display_train_periods"], ctx["display_total_hist"]):
         trend_rows.append([str(period), fmt_eok(v), "-", "-"])
     for period, bu, td in zip(fc_periods, ctx["fc_bottomup_arr"], result["total_fc_topdown"]):
         trend_rows.append([str(period), "-", fmt_eok(bu), fmt_eok(td)])
@@ -1216,7 +1288,7 @@ def build_pdf_report(outpath, df, result, src_name, sheet_name, exclude_processe
     # ---- 공정×메이커×모델 상세 예측 (전체 조합, HTML과 동일하게 생략 없이 전부 표시) ----
     pdf.add_page()
     section_title(f"공정×메이커×모델 상세 예측 (전체 {len(detail)}개 조합)")
-    det_sorted = detail.sort_values(["공정", "메이커", "모델"])
+    det_sorted = sort_detail_table(detail)
     rows = [["공정", "메이커", "모델", "직전실적(금액)", "예측합계(금액)", "예측합계(수량)", "적용알고리즘", "신뢰도"]]
     for _, r in det_sorted.iterrows():
         conf = confidence_label(r["backtest_scores"], r["method"])
