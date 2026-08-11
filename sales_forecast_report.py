@@ -517,6 +517,11 @@ def reader_guide_items(n_ahead, unit, method_count):
          "백테스트 자체가 불가능했던 조합은 'N/A'로 표시하고 보수적으로 과거 평균을 유지합니다."),
         ("메이커(설비)", "RAWDATA의 '메이커' 컬럼을 설비 제조사 기준 구분으로 사용해 집계했습니다."),
         ("금액 표기", "모든 금액은 억원 단위로 축약해 표기합니다. (예: 68,535,079,090원 → 685.35억원)"),
+        ("상한적용",
+         f"예측신뢰도가 '낮음(참고용)'인 조합은 통계 모델이 불안정한 추세·계절성을 과도하게 연장해 "
+         f"예측치가 비정상적으로 튈 수 있습니다. 이를 막기 위해 이런 조합은 한 {unit}의 예측치가 과거 최대 실적의 "
+         f"{LOW_CONFIDENCE_CAP_MULTIPLIER:.0f}배를 넘지 않도록 자동으로 상한을 적용하고, 상세표에 '상한적용' "
+         f"배지로 표시합니다."),
     ]
 
 
@@ -543,6 +548,32 @@ def confidence_label(scores, method):
 
 CONFIDENCE_RANK = {"높음": 0, "보통": 1, "낮음(참고용)": 2, "N/A": 3}
 
+# 신뢰도가 "낮음(참고용)"인 조합은 백테스트 오차가 25%를 넘어 알고리즘이 불안정한 추세/계절성을
+# 과도하게 연장했을 가능성이 있다. 이런 예측이 과거 최대 실적 대비 비정상적으로 튀어 리포트
+# 총계를 왜곡하지 않도록, 한 기간의 예측치가 과거 최대 실적의 이 배수를 넘지 않게 상한을 둔다.
+LOW_CONFIDENCE_CAP_MULTIPLIER = 2.0
+
+
+def _cap_low_confidence_forecast(fc, values, method, scores, logger=None, series_name=""):
+    """신뢰도 낮음(참고용) 조합의 예측치가 과거 최대 실적 대비 튀는 것을 막는다.
+    반환: (조정된 예측 array, 상한이 실제로 적용됐는지 여부)"""
+    if confidence_label(scores, method) != "낮음(참고용)":
+        return fc, False
+    values = np.asarray(values, dtype=float)
+    nz = values[values > 0]
+    if len(nz) == 0:
+        return fc, False
+    cap = float(np.max(nz)) * LOW_CONFIDENCE_CAP_MULTIPLIER
+    if cap <= 0 or not np.any(fc > cap):
+        return fc, False
+    capped = np.minimum(fc, cap)
+    if logger:
+        logger.info(
+            f"[{series_name}] 신뢰도 낮음(오차 {scores[method]*100:.1f}%) + 예측치가 과거 최대 실적의 "
+            f"{LOW_CONFIDENCE_CAP_MULTIPLIER:.0f}배({cap:,.0f})를 초과해 상한을 적용했습니다."
+        )
+    return capped, True
+
 
 def sort_detail_table(detail):
     """공정×메이커×모델 상세 예측표 정렬 기준: 예측수량 많음→적음, 동률이면 예측신뢰도 높음→낮음."""
@@ -557,7 +588,8 @@ def forecast_series(values, n_ahead, season=4, window=4, logger=None, series_nam
     """여러 예측 알고리즘을 백테스트(과거 구간을 학습/검증으로 나눠 실제값과 비교)하여
     오차(sMAPE)가 가장 낮은, 즉 가장 정합성 높은 방법으로 최종 예측한다.
     데이터가 너무 짧아 백테스트가 불가능하면 표본 크기에 따른 보수적 방법으로 대체한다.
-    반환: (forecast_array, method_name, backtest_scores dict[method_name -> smape])"""
+    신뢰도가 낮음(참고용)인 결과는 과거 최대 실적 대비 튀지 않도록 상한을 적용한다.
+    반환: (forecast_array, method_name, backtest_scores dict[method_name -> smape], capped)"""
     values = np.asarray(values, dtype=float)
     n = len(values)
     nz_count = int(np.count_nonzero(values))
@@ -565,7 +597,7 @@ def forecast_series(values, n_ahead, season=4, window=4, logger=None, series_nam
     if n == 0 or nz_count == 0:
         if logger:
             logger.info(f"[{series_name}] 거래 이력이 없어 예측치를 0으로 둡니다.")
-        return np.zeros(n_ahead), "표본부족(평균유지)", {}
+        return np.zeros(n_ahead), "표본부족(평균유지)", {}, False
 
     methods = build_candidate_methods(season, window)
     test_h = max(1, min(n_ahead, 4))
@@ -597,11 +629,11 @@ def forecast_series(values, n_ahead, season=4, window=4, logger=None, series_nam
             rate = croston_sba(values)
             if logger:
                 logger.info(f"[{series_name}] 데이터가 짧아(n={n}) 백테스트 불가 → 간헐수요모델(Croston-SBA) 적용")
-            return np.full(n_ahead, rate), "간헐수요모델(Croston-SBA)", {}
+            return np.full(n_ahead, rate), "간헐수요모델(Croston-SBA)", {}, False
         avg = float(np.mean(values[values > 0])) if nz_count > 0 else 0.0
         if logger:
             logger.info(f"[{series_name}] 표본 부족(n={n}, 유효거래 {nz_count}건) → 평균유지 적용")
-        return np.full(n_ahead, avg), "표본부족(평균유지)", {}
+        return np.full(n_ahead, avg), "표본부족(평균유지)", {}, False
 
     ranked = sorted(scores.items(), key=lambda kv: kv[1])
     if logger:
@@ -612,12 +644,13 @@ def forecast_series(values, n_ahead, season=4, window=4, logger=None, series_nam
         fc = methods[name](values, n_ahead)
         if fc is not None:
             fc = np.maximum(np.asarray(fc, dtype=float), 0.0)
+            fc, capped = _cap_low_confidence_forecast(fc, values, name, scores, logger, series_name)
             if logger:
-                logger.info(f"[{series_name}] 최종 선택 알고리즘: {name}")
-            return fc, name, scores
+                logger.info(f"[{series_name}] 최종 선택 알고리즘: {name}" + (" (상한 적용됨)" if capped else ""))
+            return fc, name, scores, capped
 
     avg = float(np.mean(values[values > 0])) if nz_count > 0 else 0.0
-    return np.full(n_ahead, avg), "표본부족(평균유지)", scores
+    return np.full(n_ahead, avg), "표본부족(평균유지)", scores, False
 
 
 # =====================================================================
@@ -667,18 +700,19 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
             qty_fc = np.zeros(n_ahead)
             method = "제외(돌발성 매출)"
             scores = {}
+            capped = False
         else:
-            amt_fc, method, scores = forecast_series(amt_hist, n_ahead, season=season, window=window,
-                                                       logger=logger, series_name=f"{series_name} [금액]")
-            qty_fc, _, _ = forecast_series(qty_hist, n_ahead, season=season, window=window,
-                                            logger=logger, series_name=f"{series_name} [수량]")
+            amt_fc, method, scores, capped = forecast_series(amt_hist, n_ahead, season=season, window=window,
+                                                               logger=logger, series_name=f"{series_name} [금액]")
+            qty_fc, _, _, _ = forecast_series(qty_hist, n_ahead, season=season, window=window,
+                                               logger=logger, series_name=f"{series_name} [수량]")
 
         baseline_len = min(n_ahead, len(amt_hist))
         baseline_amt = float(np.sum(amt_hist[-baseline_len:])) if baseline_len else 0.0
 
         results.append({
             "공정": proc, "메이커": maker, "모델": model, "excluded": excluded, "method": method,
-            "backtest_scores": scores,
+            "backtest_scores": scores, "capped": capped,
             "amt_hist": amt_hist, "qty_hist": qty_hist,
             "amt_fc": amt_fc, "qty_fc": qty_fc,
             "amt_fc_total": float(np.sum(amt_fc)), "qty_fc_total": float(np.sum(qty_fc)),
@@ -693,7 +727,7 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
 
     # 전사/공정 top-down (계절성 반영) — bottom-up과 교차검증용
     total_hist = amt_piv.sum(axis=1).values
-    total_fc_topdown, total_method_topdown, _ = forecast_series(
+    total_fc_topdown, total_method_topdown, _, _ = forecast_series(
         total_hist, n_ahead, season=season, window=window, logger=logger, series_name="전사 합계(전사통합)")
 
     proc_topdown = {}
@@ -705,8 +739,8 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
             proc_topdown[proc] = (np.zeros(n_ahead), "데이터없음", {})
             continue
         series = amt_piv[cols].sum(axis=1).values
-        fc, m, sc = forecast_series(series, n_ahead, season=season, window=window,
-                                     logger=logger, series_name=f"공정 합계(전사통합): {proc}")
+        fc, m, sc, _ = forecast_series(series, n_ahead, season=season, window=window,
+                                        logger=logger, series_name=f"공정 합계(전사통합): {proc}")
         proc_topdown[proc] = (fc, m, sc)
 
     return {
@@ -866,6 +900,7 @@ img {{ max-width:100%; border-radius:8px; box-shadow:0 1px 6px rgba(0,0,0,0.08);
 .stat .label {{ font-size:12px; color:{gray}; }}
 .stat .value {{ font-size:20px; font-weight:bold; color:{magenta}; margin-top:4px;}}
 .methodbadge {{ display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; background:#EEE; color:#555;}}
+.capbadge {{ display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; background:#FDECEA; color:#B3261E; margin-left:4px;}}
 .conf-high {{ color:#1F7A1F; font-weight:bold; }}
 .conf-mid {{ color:#B8860B; font-weight:bold; }}
 .conf-low {{ color:#C00000; font-weight:bold; }}
@@ -1030,10 +1065,13 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
     top3 = active.reindex(active["diff_amt"].abs().sort_values(ascending=False).index).head(3)
     conf_counts = active.apply(lambda r: confidence_label(r["backtest_scores"], r["method"]), axis=1).value_counts() \
         if len(active) else pd.Series(dtype=int)
+    capped_count = int(active["capped"].sum()) if len(active) else 0
     conf_txt = (f" 조합별 예측 신뢰도는 높음 {int(conf_counts.get('높음', 0))}건, "
                 f"보통 {int(conf_counts.get('보통', 0))}건, "
                 f"낮음(참고용) {int(conf_counts.get('낮음(참고용)', 0))}건, "
-                f"산정불가(N/A) {int(conf_counts.get('N/A', 0))}건입니다.")
+                f"산정불가(N/A) {int(conf_counts.get('N/A', 0))}건입니다." +
+                (f" 이 중 {capped_count}건은 신뢰도가 낮아 과거 최대 실적 대비 예측치가 과도하게 튀지 않도록 "
+                 f"상한을 적용했습니다." if capped_count else ""))
 
     if total_pct is not None and len(top3):
         narrative = (f"설정한 예측기간({fc_periods[0]}~{fc_periods[-1]}) 전사 합계 예측은 {fmt_eok(total_fc)}로, "
@@ -1049,6 +1087,8 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         cls = {"높음": "conf-high", "보통": "conf-mid", "낮음(참고용)": "conf-low"}.get(label, "")
         return f'<span class="{cls}">{label}</span>' if cls else label
 
+    cap_badge = ' <span class="capbadge">상한적용</span>'
+
     det_sorted = sort_detail_table(detail)
     detail_rows = []
     for _, r in det_sorted.iterrows():
@@ -1056,7 +1096,8 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
             f"<tr><td>{r['공정']}</td><td>{r['메이커']}</td><td style='text-align:left'>{r['모델']}</td>"
             f"<td>{fmt_eok(r['baseline_amt'])}</td>"
             f"<td>{fmt_eok(r['amt_fc_total'])}</td><td>{r['qty_fc_total']:.1f}</td>"
-            f"<td><span class='methodbadge'>{r['method']}</span></td>"
+            f"<td><span class='methodbadge'>{r['method']}</span>"
+            f"{cap_badge if r['capped'] else ''}</td>"
             f"<td>{conf_span(r['backtest_scores'], r['method'])}</td></tr>")
     detail_table = (f"<table><tr><th>공정</th><th>메이커(설비)</th><th>모델</th><th>직전동기간실적(금액)</th>"
                      f"<th>예측합계(금액)</th><th>예측합계(수량)</th><th>적용알고리즘</th><th>예측신뢰도</th></tr>"
@@ -1292,8 +1333,9 @@ def build_pdf_report(outpath, df, result, src_name, sheet_name, exclude_processe
     rows = [["공정", "메이커", "모델", "직전실적(금액)", "예측합계(금액)", "예측합계(수량)", "적용알고리즘", "신뢰도"]]
     for _, r in det_sorted.iterrows():
         conf = confidence_label(r["backtest_scores"], r["method"])
+        method_s = r["method"] + (" (상한적용)" if r["capped"] else "")
         rows.append([str(r["공정"]), str(r["메이커"]), str(r["모델"]), fmt_eok(r["baseline_amt"]),
-                     fmt_eok(r["amt_fc_total"]), f"{r['qty_fc_total']:.1f}", r["method"], conf])
+                     fmt_eok(r["amt_fc_total"]), f"{r['qty_fc_total']:.1f}", method_s, conf])
     draw_table(rows, col_widths=(20, 20, 20, 26, 26, 18, 44, 16),
                aligns=("LEFT", "LEFT", "LEFT", "RIGHT", "RIGHT", "RIGHT", "LEFT", "CENTER"))
 
