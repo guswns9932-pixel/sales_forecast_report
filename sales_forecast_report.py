@@ -140,10 +140,11 @@ class QueueLogHandler(logging.Handler):
             pass
 
 
-def setup_logger(outdir, extra_handler=None):
-    """콘솔과 텍스트 파일(UTF-8 BOM, 메모장 호환) 양쪽에 동시에 기록하는 로거를 만든다."""
+def setup_logger(outdir, extra_handler=None, ts=None):
+    """콘솔과 텍스트 파일(UTF-8 BOM, 메모장 호환) 양쪽에 동시에 기록하는 로거를 만든다.
+    ts를 지정하면 같은 실행에서 생성되는 HTML/PDF 파일명과 시각을 통일할 수 있다."""
     outdir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = ts or datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = outdir / f"실행로그_{ts}.txt"
 
     logger = logging.getLogger("sales_forecast")
@@ -1239,7 +1240,8 @@ def run_pipeline(input_path, sheet, gran, train_start, train_end, forecast_start
     CLI 콘솔 모드와 GUI 모드가 이 함수를 공유한다."""
     input_path = Path(input_path)
     outdir, outdir_fallback_note = _ensure_writable_dir(Path(outdir))
-    logger, log_path = setup_logger(outdir, extra_handler=extra_log_handler)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    logger, log_path = setup_logger(outdir, extra_handler=extra_log_handler, ts=ts)
     if outdir_fallback_note:
         logger.warning(outdir_fallback_note)
     logger.info("=" * 70)
@@ -1264,13 +1266,13 @@ def run_pipeline(input_path, sheet, gran, train_start, train_end, forecast_start
     logger.info("[3/5] 그래프/리포트 생성 중...")
     html, ctx = build_html_report(df, result, input_path.name, sheet, exclude_processes or [], log_path)
     html_path = _safe_write_file(lambda p: p.write_text(html, encoding="utf-8"),
-                                  outdir / "매출예측_리포트.html", logger)
+                                  outdir / f"매출예측_리포트_{ts}.html", logger)
     logger.info(f"      -> {html_path}")
 
     logger.info("[4/5] PDF 생성 중...")
     pdf_path = _safe_write_file(
         lambda p: build_pdf_report(p, df, result, input_path.name, sheet, exclude_processes or [], ctx, log_path),
-        outdir / "매출예측_리포트.pdf", logger)
+        outdir / f"매출예측_리포트_{ts}.pdf", logger)
     logger.info(f"      -> {pdf_path}")
 
     logger.info("[5/5] 완료!")
