@@ -419,6 +419,24 @@ def seasonal_ets_forecast(values, n_ahead, season_periods):
         return None
 
 
+def theta_forecast(values, n_ahead, season):
+    """Theta 방법(Assimakopoulos & Nikolopoulos, 2000). 지수평활과 추세연장을 결합한
+    간단한 통계 모델로, M3 예측 경진대회에서 우승하고 M4에서도 상위권을 기록했다.
+    statsmodels의 최적화된(Optimized Theta) 구현을 사용한다."""
+    from statsmodels.tsa.forecasting.theta import ThetaModel
+    values = np.asarray(values, dtype=float)
+    if len(values) < 4:
+        return None
+    period = season if season and season >= 2 else 1
+    try:
+        model = ThetaModel(values, period=period)
+        fit = model.fit()
+        fc = fit.forecast(n_ahead)
+        return np.maximum(np.asarray(fc, dtype=float), 0.0)
+    except Exception:
+        return None
+
+
 def linear_trend_forecast(values, n_ahead):
     """단순 선형회귀 추세 연장(0 하한)."""
     values = np.asarray(values, dtype=float)
@@ -515,12 +533,13 @@ def build_candidate_methods(season, window):
         "이동평균": lambda v, h: moving_average_forecast(v, h, window),
         "평균유지": lambda v, h: simple_mean_forecast(v, h),
         "간헐수요모델(Croston-SBA)": lambda v, h: np.full(h, croston_sba(v)),
+        "Theta": lambda v, h: theta_forecast(v, h, season),
     }
     if season and season >= 2:
         methods["계절성 지수평활(Holt-Winters)"] = lambda v, h: seasonal_ets_forecast(v, h, season)
         methods["계절성 단순모형(전년동기)"] = lambda v, h: seasonal_naive_forecast(v, h, season)
 
-    log_targets = ["선형추세", "이동평균", "평균유지"]
+    log_targets = ["선형추세", "이동평균", "평균유지", "Theta"]
     if season and season >= 2:
         log_targets.append("계절성 지수평활(Holt-Winters)")
     for name in log_targets:
@@ -541,6 +560,8 @@ METHOD_DESCRIPTIONS = {
     "이동평균": "가장 최근 {window}개 {unit}의 평균값을 다음 {unit} 예측치로 그대로 사용합니다.",
     "계절성 단순모형(전년동기)": "1년 전 같은 {unit}의 실적을 그대로 사용합니다. 추세는 약하지만 계절성이 뚜렷할 때 유리합니다.",
     "평균유지": "과거 전체 평균값을 보수적으로 유지합니다.",
+    "Theta": "지수평활과 추세연장을 결합한 통계 모델로, 국제 예측 경진대회(M3/M4)에서 상위권을 기록한 "
+             "간단하면서도 정확도가 검증된 방법입니다.",
     "표본부족(평균유지)": "유효한 거래 데이터가 너무 적어 백테스트를 수행할 수 없어, 과거 평균을 보수적으로 유지했습니다.",
     "제외(돌발성 매출)": "돌발성·일회성 매출로 분류되어 예측 대상에서 제외되었습니다(과거 실적은 참고용으로만 표시).",
 }
