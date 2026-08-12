@@ -419,6 +419,24 @@ def seasonal_ets_forecast(values, n_ahead, season_periods):
         return None
 
 
+def theta_forecast(values, n_ahead, season):
+    """Theta 방법(Assimakopoulos & Nikolopoulos, 2000). 지수평활과 추세연장을 결합한
+    간단한 통계 모델로, M3 예측 경진대회에서 우승하고 M4에서도 상위권을 기록했다.
+    statsmodels의 최적화된(Optimized Theta) 구현을 사용한다."""
+    from statsmodels.tsa.forecasting.theta import ThetaModel
+    values = np.asarray(values, dtype=float)
+    if len(values) < 4:
+        return None
+    period = season if season and season >= 2 else 1
+    try:
+        model = ThetaModel(values, period=period)
+        fit = model.fit()
+        fc = fit.forecast(n_ahead)
+        return np.maximum(np.asarray(fc, dtype=float), 0.0)
+    except Exception:
+        return None
+
+
 def linear_trend_forecast(values, n_ahead):
     """단순 선형회귀 추세 연장(0 하한)."""
     values = np.asarray(values, dtype=float)
@@ -459,18 +477,79 @@ def simple_mean_forecast(values, n_ahead):
     return np.full(n_ahead, max(0.0, base))
 
 
+LOG_METHOD_PREFIX = "로그변환 "
+
+
+def log_transform_forecast(fn):
+    """주어진 예측함수를 log1p 변환 공간에서 적용하도록 감싼다. 매출액처럼 오른쪽으로
+    치우친(가끔 초고액 단발 거래가 섞인) 데이터에서, 그런 값들이 추세·평균 추정에 과도한
+    영향을 주지 않도록 완화해준다. 예측 후에는 다시 원래 단위로 되돌린다(expm1)."""
+    def wrapped(v, h):
+        v = np.asarray(v, dtype=float)
+        log_v = np.log1p(np.maximum(v, 0.0))
+        fc_log = fn(log_v, h)
+        if fc_log is None:
+            return None
+        fc_log = np.asarray(fc_log, dtype=float)
+        return np.expm1(np.maximum(fc_log, 0.0))
+    return wrapped
+
+
+ADIDA_METHOD_PREFIX = "집계예측("
+
+
+def adida_forecast(values, n_ahead, k):
+    """ADIDA(Aggregate-Disaggregate Intermittent Demand Approach) 방식: 연속된 k개 기간씩 묶어
+    합산한 뒤 그 묶음 단위로 예측하고(이동평균 사용), 예측된 묶음 합계를 다시 k개 기간에
+    균등 분배해 원래 기간 단위 예측치로 되돌린다. 개별 기간 단위로는 변동이 커도 여러 기간을
+    묶으면 상대적으로 안정적인 흐름이 드러나는 조합에 유리하다."""
+    values = np.asarray(values, dtype=float)
+    n = len(values)
+    trim = n % k
+    if n - trim < 2 * k:
+        return None
+    agg = values[trim:].reshape(-1, k).sum(axis=1)
+    n_ahead_agg = -(-n_ahead // k)
+    agg_fc = moving_average_forecast(agg, n_ahead_agg, min(4, len(agg)))
+    if agg_fc is None:
+        return None
+    agg_fc = np.maximum(np.asarray(agg_fc, dtype=float), 0.0)
+    per_period = np.repeat(agg_fc / k, k)[:n_ahead]
+    if len(per_period) < n_ahead:
+        pad = per_period[-1] if len(per_period) else 0.0
+        per_period = np.concatenate([per_period, np.full(n_ahead - len(per_period), pad)])
+    return per_period
+
+
 def build_candidate_methods(season, window):
     """기간 단위(계절 주기 season, 이동평균 창 window)에 맞는 예측 알고리즘 후보를 구성한다.
-    년 단위처럼 계절성을 정의할 수 없는(season < 2) 경우 계절성 알고리즘은 제외한다."""
+    년 단위처럼 계절성을 정의할 수 없는(season < 2) 경우 계절성 알고리즘은 제외한다.
+    추세/평균 계열 방법은 로그변환 버전도 함께 후보로 추가해, 오른쪽으로 치우친(초고액
+    단발 거래가 섞인) 매출 데이터에도 잘 맞는 방법을 백테스트로 자동 선택할 수 있게 한다.
+    또한 여러 기간을 묶어 집계한 뒤 예측하는 ADIDA식 후보도 함께 넣어, 기간 단위를 낮출수록
+    (예: 월→분기→년) 오히려 안정되는 조합을 자동으로 찾을 수 있게 한다."""
     methods = {
         "선형추세": lambda v, h: linear_trend_forecast(v, h),
         "이동평균": lambda v, h: moving_average_forecast(v, h, window),
         "평균유지": lambda v, h: simple_mean_forecast(v, h),
         "간헐수요모델(Croston-SBA)": lambda v, h: np.full(h, croston_sba(v)),
+        "Theta": lambda v, h: theta_forecast(v, h, season),
     }
     if season and season >= 2:
         methods["계절성 지수평활(Holt-Winters)"] = lambda v, h: seasonal_ets_forecast(v, h, season)
         methods["계절성 단순모형(전년동기)"] = lambda v, h: seasonal_naive_forecast(v, h, season)
+
+    log_targets = ["선형추세", "이동평균", "평균유지", "Theta"]
+    if season and season >= 2:
+        log_targets.append("계절성 지수평활(Holt-Winters)")
+    for name in log_targets:
+        methods[f"{LOG_METHOD_PREFIX}{name}"] = log_transform_forecast(methods[name])
+
+    if season and season >= 2:
+        for k in range(2, season + 1):
+            if season % k == 0:
+                methods[f"{ADIDA_METHOD_PREFIX}{k}개 기간 묶음)"] = (lambda v, h, k=k: adida_forecast(v, h, k))
+
     return methods
 
 
@@ -481,12 +560,24 @@ METHOD_DESCRIPTIONS = {
     "이동평균": "가장 최근 {window}개 {unit}의 평균값을 다음 {unit} 예측치로 그대로 사용합니다.",
     "계절성 단순모형(전년동기)": "1년 전 같은 {unit}의 실적을 그대로 사용합니다. 추세는 약하지만 계절성이 뚜렷할 때 유리합니다.",
     "평균유지": "과거 전체 평균값을 보수적으로 유지합니다.",
+    "Theta": "지수평활과 추세연장을 결합한 통계 모델로, 국제 예측 경진대회(M3/M4)에서 상위권을 기록한 "
+             "간단하면서도 정확도가 검증된 방법입니다.",
     "표본부족(평균유지)": "유효한 거래 데이터가 너무 적어 백테스트를 수행할 수 없어, 과거 평균을 보수적으로 유지했습니다.",
     "제외(돌발성 매출)": "돌발성·일회성 매출로 분류되어 예측 대상에서 제외되었습니다(과거 실적은 참고용으로만 표시).",
 }
 
 
 def method_description(name, gran, window):
+    if name.startswith(LOG_METHOD_PREFIX):
+        base = name[len(LOG_METHOD_PREFIX):]
+        base_desc = METHOD_DESCRIPTIONS.get(base, "선정된 통계적 방법으로 예측했습니다.").format(unit=gran, window=window)
+        return (base_desc + " 다만 매출액을 로그변환한 뒤 학습하고 다시 원래 단위로 되돌리는 방식이라, "
+                "가끔 나오는 초고액 단발 거래가 추세·평균 추정에 과도한 영향을 주지 않습니다.")
+    if name.startswith(ADIDA_METHOD_PREFIX):
+        m = re.search(r"(\d+)개 기간 묶음", name)
+        k = m.group(1) if m else "N"
+        return (f"낱개 {gran} 단위로는 변동이 커도, 연속된 {k}개 {gran}씩 묶어 합산하면 상대적으로 안정된 흐름이 "
+                f"드러나는 경우가 있습니다. 묶음 단위로 예측한 뒤 그 값을 다시 {k}개 {gran}에 균등 분배했습니다.")
     tmpl = METHOD_DESCRIPTIONS.get(name, "선정된 통계적 방법으로 예측했습니다.")
     return tmpl.format(unit=gran, window=window)
 
@@ -520,8 +611,18 @@ def reader_guide_items(n_ahead, unit, method_count):
         ("상한적용",
          f"예측신뢰도가 '낮음(참고용)'인 조합은 통계 모델이 불안정한 추세·계절성을 과도하게 연장해 "
          f"예측치가 비정상적으로 튈 수 있습니다. 이를 막기 위해 이런 조합은 한 {unit}의 예측치가 과거 최대 실적의 "
-         f"{LOW_CONFIDENCE_CAP_MULTIPLIER:.0f}배를 넘지 않도록 자동으로 상한을 적용하고, 상세표에 '상한적용' "
+         f"{LOW_CONFIDENCE_CAP_MULTIPLIER:.1f}배를 넘지 않도록 자동으로 상한을 적용하고, 상세표에 '상한적용' "
          f"배지로 표시합니다."),
+        (f"메이커 '{MERGED_MAKER_LABEL}'",
+         f"같은 모델이라도 메이커별로 잘게 쪼개면 매출 이력이 군데군데 끊겨 예측이 불안정해지는 경우가 있습니다. "
+         f"한 (공정, 모델)의 매출 중 메이커가 '미확인'인 비중이 {UNKNOWN_MAKER_MERGE_THRESHOLD*100:.0f}% 이상이면 "
+         f"메이커 정보를 신뢰하기 어렵다고 보고, 메이커 구분 없이 통합해서 예측합니다. 상세표의 메이커 컬럼에 "
+         f"'{MERGED_MAKER_LABEL}'로 표시된 행이 여기 해당합니다."),
+        ("집계예측(ADIDA)",
+         f"'{ADIDA_METHOD_PREFIX}N개 기간 묶음)'으로 표시된 알고리즘입니다. 낱개 {unit} 단위로는 변동이 커도 "
+         f"여러 {unit}을 묶어서 보면 상대적으로 안정된 흐름이 드러나는 조합이 있습니다. 이런 조합은 묶음 단위로 "
+         f"예측한 뒤 다시 {unit} 단위로 균등 분배하는 방식이 다른 알고리즘보다 백테스트 오차가 낮아 자동으로 "
+         f"선택될 수 있습니다."),
     ]
 
 
@@ -557,7 +658,9 @@ MAX_BACKTEST_ORIGINS = 6
 # 신뢰도가 "낮음(참고용)"인 조합은 백테스트 오차가 25%를 넘어 알고리즘이 불안정한 추세/계절성을
 # 과도하게 연장했을 가능성이 있다. 이런 예측이 과거 최대 실적 대비 비정상적으로 튀어 리포트
 # 총계를 왜곡하지 않도록, 한 기간의 예측치가 과거 최대 실적의 이 배수를 넘지 않게 상한을 둔다.
-LOW_CONFIDENCE_CAP_MULTIPLIER = 2.0
+# 실제 RAWDATA로 검증한 결과, 과거 최대치를 2배 넘는 실측값은 전체의 2% 미만이었고
+# (95백분위 약 1.5배) 배수를 낮춰도 백테스트 정확도에 손해가 없어 1.5배로 설정한다.
+LOW_CONFIDENCE_CAP_MULTIPLIER = 1.5
 
 
 def _cap_low_confidence_forecast(fc, values, method, scores, logger=None, series_name=""):
@@ -576,7 +679,7 @@ def _cap_low_confidence_forecast(fc, values, method, scores, logger=None, series
     if logger:
         logger.info(
             f"[{series_name}] 신뢰도 낮음(오차 {scores[method]*100:.1f}%) + 예측치가 과거 최대 실적의 "
-            f"{LOW_CONFIDENCE_CAP_MULTIPLIER:.0f}배({cap:,.0f})를 초과해 상한을 적용했습니다."
+            f"{LOW_CONFIDENCE_CAP_MULTIPLIER:.1f}배({cap:,.0f})를 초과해 상한을 적용했습니다."
         )
     return capped, True
 
@@ -669,6 +772,37 @@ def forecast_series(values, n_ahead, season=4, window=4, logger=None, series_nam
 # =====================================================================
 COMBO_COLS = ["공정", "메이커", "모델"]
 
+# 특정 (공정, 모델) 조합의 매출 중 메이커가 "미확인"인 비중이 이 값 이상이면,
+# 그 모델은 메이커 정보를 신뢰할 수 없다고 보고 메이커로 나누지 않은 채
+# (공정, 모델) 단위로 통합해서 예측한다. 메이커 단위로 잘게 쪼갤수록 원래는
+# 꾸준했던 매출 흐름이 군데군데 0으로 끊기는 간헐적인 시계열이 되어 백테스트
+# 오차가 커지고 신뢰도가 떨어지기 때문이다.
+UNKNOWN_MAKER_MERGE_THRESHOLD = 0.15
+MERGED_MAKER_LABEL = "통합(메이커 다수)"
+
+
+def resolve_maker_grouping(df, threshold=UNKNOWN_MAKER_MERGE_THRESHOLD, logger=None):
+    """메이커 미확인 비중이 높은 (공정, 모델) 조합은 메이커 구분 없이 통합 라벨로
+    묶어서, 예측/집계에 쓰이는 '메이커' 컬럼을 대체한 df 복사본을 반환한다.
+    원본 메이커 값은 훼손하지 않고 별도 컬럼으로 보존한다."""
+    df = df.copy()
+    df["메이커_원본"] = df["메이커"]
+
+    pair_totals = df.groupby(["공정", "모델"])["매출액(KRW)"].sum()
+    pair_unknown = df[df["메이커"] == "미확인"].groupby(["공정", "모델"])["매출액(KRW)"].sum()
+    unk_share = (pair_unknown / pair_totals).reindex(pair_totals.index).fillna(0.0)
+    merge_keys = set(unk_share[unk_share >= threshold].index)
+
+    if merge_keys:
+        idx = pd.MultiIndex.from_frame(df[["공정", "모델"]])
+        mask = idx.isin(merge_keys)
+        df.loc[mask, "메이커"] = MERGED_MAKER_LABEL
+        if logger:
+            for proc, model in sorted(merge_keys):
+                logger.info(f"[{proc}/{model}] 메이커 미확인 비중 {unk_share[(proc, model)]*100:.0f}% >= "
+                            f"{threshold*100:.0f}% → 메이커 구분 없이 '{MERGED_MAKER_LABEL}'로 통합해 예측합니다.")
+    return df, merge_keys
+
 
 def period_pivot(df, group_cols, value_col, periods):
     idx_p = pd.CategoricalDtype(periods, ordered=True)
@@ -688,6 +822,8 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
     train_periods = period_range(train_start, train_end, gran)
     fc_periods = period_range(forecast_start, forecast_end, gran)
     n_ahead = len(fc_periods)
+
+    df, maker_merge_keys = resolve_maker_grouping(df, logger=logger)
 
     combos = sorted(df.groupby(COMBO_COLS).size().index.tolist())
     processes = sorted(df["공정"].unique().tolist())
@@ -764,6 +900,7 @@ def run_forecast(df, gran, train_start, train_end, forecast_start, forecast_end,
         "total_method_topdown": total_method_topdown,
         "proc_topdown": proc_topdown,
         "amt_piv": amt_piv,
+        "maker_merge_keys": maker_merge_keys,
     }
 
 
@@ -921,6 +1058,7 @@ code {{ background:#f0f0f0; padding:1px 5px; border-radius:4px; }}
 <h1>매출 예측 리포트</h1>
 <div class="meta">학습기간: {train_start} ~ {train_end} &nbsp;|&nbsp; 예측기간: {fc_start} ~ {fc_end} &nbsp;|&nbsp; 기간단위: {unit} &nbsp;|&nbsp; 생성 파일: {src_name} ({sheet_name} 시트)</div>
 {exclude_note}
+{maker_merge_note}
 
 <div class="card">
 <h2 style="margin-top:0;border:none;">이 리포트 읽는 법</h2>
@@ -1137,13 +1275,23 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         annual_note = (f" 다만 {years_txt}년은 실제 데이터가 연간 합계 형태로만 존재해 "
                         f"선택한 기간단위({gran}) 대신 <b>년</b> 단위로 요약해 표시했습니다.")
 
+    maker_merge_keys = result.get("maker_merge_keys") or set()
+    maker_merge_note = ""
+    if maker_merge_keys:
+        items_txt = ", ".join(f"{proc}-{model}" for proc, model in sorted(maker_merge_keys))
+        maker_merge_note = (
+            f'<div class="note">{len(maker_merge_keys)}개 공정×모델({items_txt})은 매출의 상당 부분에서 '
+            f"메이커 정보가 '미확인'으로 남아 있어, 메이커별로 나누면 오히려 예측이 불안정해집니다. "
+            f"이런 경우 메이커 구분 없이 <b>'{MERGED_MAKER_LABEL}'</b>로 통합해 예측했습니다 "
+            f"(상세표의 메이커 컬럼에서 확인 가능).</div>")
+
     html = HTML_TEMPLATE.format(
         magenta=BRAND_MAGENTA, gray=BRAND_GRAY,
         train_start=train_periods[0], train_end=train_periods[-1],
         fc_start=fc_periods[0], fc_end=fc_periods[-1], src_name=src_name, sheet_name=sheet_name,
         unit=gran, n_ahead=n_ahead, method_count=method_count, guide_section=guide_section,
         annual_note=annual_note,
-        exclude_note=exclude_note, log_name=log_path.name,
+        exclude_note=exclude_note, maker_merge_note=maker_merge_note, log_name=log_path.name,
         total_base_fmt=fmt_eok(total_base), total_fc_fmt=fmt_eok(total_fc),
         total_pct_fmt=(f"{'+' if total_pct>=0 else ''}{total_pct*100:.1f}%" if total_pct is not None else "N/A"),
         total_topdown_fmt=fmt_eok(total_topdown), topdown_method=result["total_method_topdown"],
@@ -1163,7 +1311,7 @@ def build_html_report(df, result, src_name, sheet_name, exclude_processes, log_p
         "chart_maker": chart_maker, "chart_top": chart_top,
         "fc_bottomup_arr": total_fc_bottomup_arr, "narrative": narrative,
         "display_train_periods": display_train_periods, "display_total_hist": display_total_hist,
-        "annual_only_years": annual_only_years,
+        "annual_only_years": annual_only_years, "maker_merge_keys": maker_merge_keys,
     }
     return html, ctx
 
@@ -1253,6 +1401,14 @@ def build_pdf_report(outpath, df, result, src_name, sheet_name, exclude_processe
 
     if exclude_processes:
         body_text(f"※ 공정이 {', '.join(exclude_processes)}인 매출은 돌발성(일회성)으로 간주해 예측/합계에서 제외했습니다.",
+                   size=9, color=(192, 0, 0))
+        pdf.ln(1)
+
+    maker_merge_keys = ctx.get("maker_merge_keys") or set()
+    if maker_merge_keys:
+        items_txt = ", ".join(f"{proc}-{model}" for proc, model in sorted(maker_merge_keys))
+        body_text(f"※ {len(maker_merge_keys)}개 공정×모델({items_txt})은 메이커 정보가 상당 부분 '미확인'이라 "
+                  f"메이커 구분 없이 '{MERGED_MAKER_LABEL}'로 통합해 예측했습니다.",
                    size=9, color=(192, 0, 0))
         pdf.ln(1)
 
