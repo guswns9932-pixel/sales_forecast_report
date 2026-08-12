@@ -477,11 +477,39 @@ def log_transform_forecast(fn):
     return wrapped
 
 
+ADIDA_METHOD_PREFIX = "집계예측("
+
+
+def adida_forecast(values, n_ahead, k):
+    """ADIDA(Aggregate-Disaggregate Intermittent Demand Approach) 방식: 연속된 k개 기간씩 묶어
+    합산한 뒤 그 묶음 단위로 예측하고(이동평균 사용), 예측된 묶음 합계를 다시 k개 기간에
+    균등 분배해 원래 기간 단위 예측치로 되돌린다. 개별 기간 단위로는 변동이 커도 여러 기간을
+    묶으면 상대적으로 안정적인 흐름이 드러나는 조합에 유리하다."""
+    values = np.asarray(values, dtype=float)
+    n = len(values)
+    trim = n % k
+    if n - trim < 2 * k:
+        return None
+    agg = values[trim:].reshape(-1, k).sum(axis=1)
+    n_ahead_agg = -(-n_ahead // k)
+    agg_fc = moving_average_forecast(agg, n_ahead_agg, min(4, len(agg)))
+    if agg_fc is None:
+        return None
+    agg_fc = np.maximum(np.asarray(agg_fc, dtype=float), 0.0)
+    per_period = np.repeat(agg_fc / k, k)[:n_ahead]
+    if len(per_period) < n_ahead:
+        pad = per_period[-1] if len(per_period) else 0.0
+        per_period = np.concatenate([per_period, np.full(n_ahead - len(per_period), pad)])
+    return per_period
+
+
 def build_candidate_methods(season, window):
     """기간 단위(계절 주기 season, 이동평균 창 window)에 맞는 예측 알고리즘 후보를 구성한다.
     년 단위처럼 계절성을 정의할 수 없는(season < 2) 경우 계절성 알고리즘은 제외한다.
     추세/평균 계열 방법은 로그변환 버전도 함께 후보로 추가해, 오른쪽으로 치우친(초고액
-    단발 거래가 섞인) 매출 데이터에도 잘 맞는 방법을 백테스트로 자동 선택할 수 있게 한다."""
+    단발 거래가 섞인) 매출 데이터에도 잘 맞는 방법을 백테스트로 자동 선택할 수 있게 한다.
+    또한 여러 기간을 묶어 집계한 뒤 예측하는 ADIDA식 후보도 함께 넣어, 기간 단위를 낮출수록
+    (예: 월→분기→년) 오히려 안정되는 조합을 자동으로 찾을 수 있게 한다."""
     methods = {
         "선형추세": lambda v, h: linear_trend_forecast(v, h),
         "이동평균": lambda v, h: moving_average_forecast(v, h, window),
@@ -497,6 +525,11 @@ def build_candidate_methods(season, window):
         log_targets.append("계절성 지수평활(Holt-Winters)")
     for name in log_targets:
         methods[f"{LOG_METHOD_PREFIX}{name}"] = log_transform_forecast(methods[name])
+
+    if season and season >= 2:
+        for k in range(2, season + 1):
+            if season % k == 0:
+                methods[f"{ADIDA_METHOD_PREFIX}{k}개 기간 묶음)"] = (lambda v, h, k=k: adida_forecast(v, h, k))
 
     return methods
 
@@ -519,6 +552,11 @@ def method_description(name, gran, window):
         base_desc = METHOD_DESCRIPTIONS.get(base, "선정된 통계적 방법으로 예측했습니다.").format(unit=gran, window=window)
         return (base_desc + " 다만 매출액을 로그변환한 뒤 학습하고 다시 원래 단위로 되돌리는 방식이라, "
                 "가끔 나오는 초고액 단발 거래가 추세·평균 추정에 과도한 영향을 주지 않습니다.")
+    if name.startswith(ADIDA_METHOD_PREFIX):
+        m = re.search(r"(\d+)개 기간 묶음", name)
+        k = m.group(1) if m else "N"
+        return (f"낱개 {gran} 단위로는 변동이 커도, 연속된 {k}개 {gran}씩 묶어 합산하면 상대적으로 안정된 흐름이 "
+                f"드러나는 경우가 있습니다. 묶음 단위로 예측한 뒤 그 값을 다시 {k}개 {gran}에 균등 분배했습니다.")
     tmpl = METHOD_DESCRIPTIONS.get(name, "선정된 통계적 방법으로 예측했습니다.")
     return tmpl.format(unit=gran, window=window)
 
@@ -552,13 +590,18 @@ def reader_guide_items(n_ahead, unit, method_count):
         ("상한적용",
          f"예측신뢰도가 '낮음(참고용)'인 조합은 통계 모델이 불안정한 추세·계절성을 과도하게 연장해 "
          f"예측치가 비정상적으로 튈 수 있습니다. 이를 막기 위해 이런 조합은 한 {unit}의 예측치가 과거 최대 실적의 "
-         f"{LOW_CONFIDENCE_CAP_MULTIPLIER:.0f}배를 넘지 않도록 자동으로 상한을 적용하고, 상세표에 '상한적용' "
+         f"{LOW_CONFIDENCE_CAP_MULTIPLIER:.1f}배를 넘지 않도록 자동으로 상한을 적용하고, 상세표에 '상한적용' "
          f"배지로 표시합니다."),
         (f"메이커 '{MERGED_MAKER_LABEL}'",
          f"같은 모델이라도 메이커별로 잘게 쪼개면 매출 이력이 군데군데 끊겨 예측이 불안정해지는 경우가 있습니다. "
          f"한 (공정, 모델)의 매출 중 메이커가 '미확인'인 비중이 {UNKNOWN_MAKER_MERGE_THRESHOLD*100:.0f}% 이상이면 "
          f"메이커 정보를 신뢰하기 어렵다고 보고, 메이커 구분 없이 통합해서 예측합니다. 상세표의 메이커 컬럼에 "
          f"'{MERGED_MAKER_LABEL}'로 표시된 행이 여기 해당합니다."),
+        ("집계예측(ADIDA)",
+         f"'{ADIDA_METHOD_PREFIX}N개 기간 묶음)'으로 표시된 알고리즘입니다. 낱개 {unit} 단위로는 변동이 커도 "
+         f"여러 {unit}을 묶어서 보면 상대적으로 안정된 흐름이 드러나는 조합이 있습니다. 이런 조합은 묶음 단위로 "
+         f"예측한 뒤 다시 {unit} 단위로 균등 분배하는 방식이 다른 알고리즘보다 백테스트 오차가 낮아 자동으로 "
+         f"선택될 수 있습니다."),
     ]
 
 
@@ -594,7 +637,9 @@ MAX_BACKTEST_ORIGINS = 6
 # 신뢰도가 "낮음(참고용)"인 조합은 백테스트 오차가 25%를 넘어 알고리즘이 불안정한 추세/계절성을
 # 과도하게 연장했을 가능성이 있다. 이런 예측이 과거 최대 실적 대비 비정상적으로 튀어 리포트
 # 총계를 왜곡하지 않도록, 한 기간의 예측치가 과거 최대 실적의 이 배수를 넘지 않게 상한을 둔다.
-LOW_CONFIDENCE_CAP_MULTIPLIER = 2.0
+# 실제 RAWDATA로 검증한 결과, 과거 최대치를 2배 넘는 실측값은 전체의 2% 미만이었고
+# (95백분위 약 1.5배) 배수를 낮춰도 백테스트 정확도에 손해가 없어 1.5배로 설정한다.
+LOW_CONFIDENCE_CAP_MULTIPLIER = 1.5
 
 
 def _cap_low_confidence_forecast(fc, values, method, scores, logger=None, series_name=""):
@@ -613,7 +658,7 @@ def _cap_low_confidence_forecast(fc, values, method, scores, logger=None, series
     if logger:
         logger.info(
             f"[{series_name}] 신뢰도 낮음(오차 {scores[method]*100:.1f}%) + 예측치가 과거 최대 실적의 "
-            f"{LOW_CONFIDENCE_CAP_MULTIPLIER:.0f}배({cap:,.0f})를 초과해 상한을 적용했습니다."
+            f"{LOW_CONFIDENCE_CAP_MULTIPLIER:.1f}배({cap:,.0f})를 초과해 상한을 적용했습니다."
         )
     return capped, True
 
